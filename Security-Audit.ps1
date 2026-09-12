@@ -4,8 +4,8 @@
 
 .DESCRIPTION
     Audits Windows Defender, Firewall, Windows Update, local accounts,
-    password policy, Administrator account, security events, BitLocker,
-    and User Account Control.
+    password policy, the built-in Administrator account, security events,
+    BitLocker, and User Account Control.
 
 .NOTES
     Requires Windows PowerShell 5.1 or PowerShell 7 on Windows.
@@ -23,7 +23,10 @@ $ErrorActionPreference = 'Continue'
 # ---------------------------------------------------------------------
 
 $LogPath = 'C:\Temp'
-$LogFileName = "SecurityAudit_$(Get-Date -Format 'yyyyMMdd_HHmmss').log"
+
+$LogFileName = 'SecurityAudit_{0}.log' -f `
+    (Get-Date -Format 'yyyyMMdd_HHmmss')
+
 $LogFile = Join-Path -Path $LogPath -ChildPath $LogFileName
 
 $Script:SecurityIssuesFound = 0
@@ -45,42 +48,54 @@ function Write-Log {
         [string]$Level = 'INFO'
     )
 
-    $Timestamp = Get-Date -Format 'yyyy-MM-dd HH:mm:ss'
-    $LogMessage = "[$Timestamp] [$Level] $Message"
+    $timestamp = Get-Date -Format 'yyyy-MM-dd HH:mm:ss'
+    $logMessage = '[{0}] [{1}] {2}' -f $timestamp, $Level, $Message
 
     switch ($Level) {
         'INFO' {
-            Write-Host $LogMessage -ForegroundColor White
+            Write-Host $logMessage -ForegroundColor White
         }
+
         'WARNING' {
-            Write-Host $LogMessage -ForegroundColor Yellow
+            Write-Host $logMessage -ForegroundColor Yellow
         }
+
         'ERROR' {
-            Write-Host $LogMessage -ForegroundColor Red
+            Write-Host $logMessage -ForegroundColor Red
         }
+
         'SUCCESS' {
-            Write-Host $LogMessage -ForegroundColor Green
+            Write-Host $logMessage -ForegroundColor Green
         }
     }
 
     try {
-        Add-Content -Path $LogFile -Value $LogMessage -Encoding UTF8
+        Add-Content `
+            -Path $LogFile `
+            -Value $logMessage `
+            -Encoding UTF8 `
+            -ErrorAction Stop
     }
     catch {
-        Write-Host "Unable to write to log file: $($_.Exception.Message)" `
+        Write-Host `
+            "Unable to write to log file: $($_.Exception.Message)" `
             -ForegroundColor Red
     }
 }
 
 function Show-Separator {
-    Write-Log '================================================================' 'INFO'
+    Write-Log `
+        -Message ('=' * 72) `
+        -Level 'INFO'
 }
 
 function Get-StatusLevel {
+    [CmdletBinding()]
     param(
         [Parameter(Mandatory = $true)]
         [bool]$Success,
 
+        [ValidateSet('INFO', 'WARNING', 'ERROR', 'SUCCESS')]
         [string]$FailureLevel = 'ERROR'
     )
 
@@ -96,73 +111,176 @@ function Test-WindowsDefender {
     Show-Separator
 
     try {
-        $DefenderService = Get-Service -Name 'WinDefend' `
+        $defenderService = Get-Service `
+            -Name 'WinDefend' `
             -ErrorAction SilentlyContinue
 
-        if ($null -eq $DefenderService) {
-            Write-Log 'Windows Defender service was not found.' 'ERROR'
+        if ($null -eq $defenderService) {
+            Write-Log `
+                'Windows Defender service was not found.' `
+                'ERROR'
+
             $Script:SecurityIssuesFound++
             return
         }
 
-        $ServiceRunning = $DefenderService.Status -eq 'Running'
+        $serviceRunning = $defenderService.Status -eq 'Running'
 
-        Write-Log "Service Status: $($DefenderService.Status)" `
-            (Get-StatusLevel -Success $ServiceRunning)
+        Write-Log `
+            -Message "Service Status: $($defenderService.Status)" `
+            -Level (Get-StatusLevel -Success $serviceRunning)
 
-        if ($ServiceRunning) {
+        if ($serviceRunning) {
             $Script:SecurityPass++
         }
         else {
-            Write-Log 'Windows Defender service is not running.' 'ERROR'
+            Write-Log `
+                'Windows Defender service is not running.' `
+                'ERROR'
+
             $Script:SecurityIssuesFound++
         }
 
-        $DefenderStatus = Get-MpComputerStatus `
-            -ErrorAction SilentlyContinue
+        $defenderStatus = Get-MpComputerStatus `
+            -ErrorAction Stop
 
-        if ($null -eq $DefenderStatus) {
-            Write-Log 'Detailed Defender status is unavailable.' 'WARNING'
+        if ($null -eq $defenderStatus) {
+            Write-Log `
+                'Detailed Defender status is unavailable.' `
+                'WARNING'
+
             $Script:SecurityWarnings++
             return
         }
 
-        $RealTimeEnabled = [bool]$DefenderStatus.RealTimeProtectionEnabled
-        $QuickScanOutOfDate = [bool]$DefenderStatus.QuickScanOutOfDate
+        $realTimeEnabled = [bool]$defenderStatus.RealTimeProtectionEnabled
 
-        Write-Log "Real-time Protection: $RealTimeEnabled" `
-            (Get-StatusLevel -Success $RealTimeEnabled)
+        Write-Log `
+            -Message "Real-time Protection: $realTimeEnabled" `
+            -Level (Get-StatusLevel -Success $realTimeEnabled)
 
-        Write-Log "Quick Scan Out Of Date: $QuickScanOutOfDate" `
-            (Get-StatusLevel -Success (-not $QuickScanOutOfDate) 'WARNING')
-
-        Write-Log "Full Scan Age (days): $($DefenderStatus.FullScanAge)" 'INFO'
-        Write-Log "Antivirus Signature Version: $($DefenderStatus.AntivirusSignatureVersion)" 'INFO'
-        Write-Log "Antispyware Signature Version: $($DefenderStatus.AntispywareSignatureVersion)" 'INFO'
-
-        if ($RealTimeEnabled) {
+        if ($realTimeEnabled) {
             $Script:SecurityPass++
         }
         else {
-            Write-Log 'Real-time protection is disabled.' 'ERROR'
+            Write-Log `
+                'Real-time protection is disabled.' `
+                'ERROR'
+
             $Script:SecurityIssuesFound++
         }
 
-        if ($QuickScanOutOfDate) {
+        # QuickScanOutOfDate is not available on all Windows versions.
+        # Use QuickScanAge or QuickScanEndTime instead.
+        $quickScanAge = $null
+        $quickScanEndTime = $null
+
+        $propertyNames = @(
+            $defenderStatus.PSObject.Properties.Name
+        )
+
+        if ($propertyNames -contains 'QuickScanAge') {
+            $quickScanAge = $defenderStatus.QuickScanAge
+        }
+
+        if ($propertyNames -contains 'QuickScanEndTime') {
+            $quickScanEndTime = $defenderStatus.QuickScanEndTime
+        }
+
+        $maximumQuickScanAgeDays = 7
+        $quickScanOutOfDate = $false
+        $quickScanUnavailable = $false
+
+        if ($null -ne $quickScanAge) {
+            # Defender may use UInt32::MaxValue when no scan exists.
+            if ([uint32]$quickScanAge -eq [uint32]::MaxValue) {
+                $quickScanUnavailable = $true
+            }
+            else {
+                $quickScanOutOfDate =
+                    [uint32]$quickScanAge -gt $maximumQuickScanAgeDays
+            }
+        }
+        elseif ($null -ne $quickScanEndTime) {
+            $quickScanOutOfDate =
+                $quickScanEndTime -lt `
+                (Get-Date).AddDays(-$maximumQuickScanAgeDays)
+        }
+        else {
+            $quickScanUnavailable = $true
+        }
+
+        if ($quickScanUnavailable) {
+            Write-Log `
+                'No quick scan has been recorded or scan status is unavailable.' `
+                'WARNING'
+
+            $Script:SecurityWarnings++
+        }
+        elseif ($quickScanOutOfDate) {
+            Write-Log `
+                "Quick scan is out of date. Age: $quickScanAge day(s)." `
+                'WARNING'
+
             $Script:SecurityWarnings++
         }
         else {
+            if ($null -ne $quickScanAge) {
+                Write-Log `
+                    "Quick scan is current. Age: $quickScanAge day(s)." `
+                    'SUCCESS'
+            }
+            else {
+                Write-Log `
+                    "Quick scan is current. Last scan: $quickScanEndTime" `
+                    'SUCCESS'
+            }
+
             $Script:SecurityPass++
         }
 
-        if ($null -ne $DefenderStatus.FullScanAge -and
-            $DefenderStatus.FullScanAge -gt 30) {
-            Write-Log "Last full scan was $($DefenderStatus.FullScanAge) days ago." 'WARNING'
-            $Script:SecurityWarnings++
+        if ($null -ne $defenderStatus.FullScanAge) {
+            $fullScanAge = [uint32]$defenderStatus.FullScanAge
+
+            if ($fullScanAge -eq [uint32]::MaxValue) {
+                Write-Log `
+                    'No full scan has been recorded.' `
+                    'WARNING'
+
+                $Script:SecurityWarnings++
+            }
+            else {
+                Write-Log `
+                    "Full Scan Age: $fullScanAge day(s)" `
+                    'INFO'
+
+                if ($fullScanAge -gt 30) {
+                    Write-Log `
+                        'Last full scan was more than 30 days ago.' `
+                        'WARNING'
+
+                    $Script:SecurityWarnings++
+                }
+            }
+        }
+
+        if ($propertyNames -contains 'AntivirusSignatureVersion') {
+            Write-Log `
+                "Antivirus Signature Version: $($defenderStatus.AntivirusSignatureVersion)" `
+                'INFO'
+        }
+
+        if ($propertyNames -contains 'AntispywareSignatureVersion') {
+            Write-Log `
+                "Antispyware Signature Version: $($defenderStatus.AntispywareSignatureVersion)" `
+                'INFO'
         }
     }
     catch {
-        Write-Log "Error checking Windows Defender: $($_.Exception.Message)" 'ERROR'
+        Write-Log `
+            -Message "Error checking Windows Defender: $($_.Exception.Message)" `
+            -Level 'ERROR'
+
         $Script:SecurityIssuesFound++
     }
 
@@ -174,42 +292,54 @@ function Test-WindowsFirewall {
     Show-Separator
 
     try {
-        $Profiles = @('Domain', 'Private', 'Public')
-        $AllEnabled = $true
+        $profiles = @('Domain', 'Private', 'Public')
+        $allEnabled = $true
 
-        foreach ($Profile in $Profiles) {
-            $FirewallProfile = Get-NetFirewallProfile `
-                -Name $Profile `
+        foreach ($profile in $profiles) {
+            $firewallProfile = Get-NetFirewallProfile `
+                -Name $profile `
                 -ErrorAction SilentlyContinue
 
-            if ($null -eq $FirewallProfile) {
-                Write-Log "$Profile firewall profile was not found." 'WARNING'
+            if ($null -eq $firewallProfile) {
+                Write-Log `
+                    "$profile firewall profile was not found." `
+                    'WARNING'
+
                 $Script:SecurityWarnings++
-                $AllEnabled = $false
+                $allEnabled = $false
                 continue
             }
 
-            $Enabled = [bool]$FirewallProfile.Enabled
+            $enabled = [bool]$firewallProfile.Enabled
 
-            Write-Log "$Profile Profile Enabled: $Enabled" `
-                (Get-StatusLevel -Success $Enabled)
+            Write-Log `
+                -Message "$profile Profile Enabled: $enabled" `
+                -Level (Get-StatusLevel -Success $enabled)
 
-            if (-not $Enabled) {
-                Write-Log "$Profile firewall profile is disabled." 'ERROR'
-                $Script:SecurityIssuesFound++
-                $AllEnabled = $false
+            if ($enabled) {
+                $Script:SecurityPass++
             }
             else {
-                $Script:SecurityPass++
+                Write-Log `
+                    "$profile firewall profile is disabled." `
+                    'ERROR'
+
+                $Script:SecurityIssuesFound++
+                $allEnabled = $false
             }
         }
 
-        if ($AllEnabled) {
-            Write-Log 'All available firewall profiles are enabled.' 'SUCCESS'
+        if ($allEnabled) {
+            Write-Log `
+                'All firewall profiles are enabled.' `
+                'SUCCESS'
         }
     }
     catch {
-        Write-Log "Error checking Windows Firewall: $($_.Exception.Message)" 'ERROR'
+        Write-Log `
+            -Message "Error checking Windows Firewall: $($_.Exception.Message)" `
+            -Level 'ERROR'
+
         $Script:SecurityIssuesFound++
     }
 
@@ -221,55 +351,80 @@ function Test-WindowsUpdate {
     Show-Separator
 
     try {
-        $UpdateService = Get-Service -Name 'wuauserv' `
+        $updateService = Get-Service `
+            -Name 'wuauserv' `
             -ErrorAction SilentlyContinue
 
-        if ($null -eq $UpdateService) {
-            Write-Log 'Windows Update service was not found.' 'ERROR'
+        if ($null -eq $updateService) {
+            Write-Log `
+                'Windows Update service was not found.' `
+                'ERROR'
+
             $Script:SecurityIssuesFound++
         }
         else {
-            $UpdateRunning = $UpdateService.Status -eq 'Running'
+            $updateRunning = $updateService.Status -eq 'Running'
 
-            Write-Log "Update Service Status: $($UpdateService.Status)" `
-                (Get-StatusLevel -Success $UpdateRunning)
+            Write-Log `
+                -Message "Update Service Status: $($updateService.Status)" `
+                -Level (Get-StatusLevel `
+                    -Success $updateRunning `
+                    -FailureLevel 'WARNING')
 
-            if ($UpdateRunning) {
+            if ($updateRunning) {
                 $Script:SecurityPass++
             }
             else {
-                Write-Log 'Windows Update service is not running.' 'WARNING'
+                Write-Log `
+                    'Windows Update service is not running.' `
+                    'WARNING'
+
                 $Script:SecurityWarnings++
             }
         }
 
-        $InstalledUpdates = Get-CimInstance `
-            -ClassName Win32_QuickFixEngineering `
-            -ErrorAction SilentlyContinue
+        $installedUpdates = @(
+            Get-CimInstance `
+                -ClassName Win32_QuickFixEngineering `
+                -ErrorAction SilentlyContinue
+        )
 
-        if ($null -eq $InstalledUpdates) {
-            Write-Log 'No installed update information was returned.' 'WARNING'
+        if ($installedUpdates.Count -eq 0) {
+            Write-Log `
+                'No installed update information was returned.' `
+                'WARNING'
+
             $Script:SecurityWarnings++
         }
         else {
-            $UpdateCount = @($InstalledUpdates).Count
-            Write-Log "Installed Updates Found: $UpdateCount" 'INFO'
+            Write-Log `
+                "Installed Updates Found: $($installedUpdates.Count)" `
+                'INFO'
 
-            $LatestUpdate = $InstalledUpdates |
-                Where-Object { $_.InstalledOn } |
+            $latestUpdate = $installedUpdates |
+                Where-Object {
+                    $null -ne $_.InstalledOn -and
+                    $_.InstalledOn.ToString().Trim() -ne ''
+                } |
                 Sort-Object InstalledOn -Descending |
                 Select-Object -First 1
 
-            if ($null -ne $LatestUpdate) {
-                Write-Log "Latest Installed Update: $($LatestUpdate.HotFixID)" 'INFO'
-                Write-Log "Latest Installed Date: $($LatestUpdate.InstalledOn)" 'INFO'
-            }
+            if ($null -ne $latestUpdate) {
+                Write-Log `
+                    "Latest Installed Update: $($latestUpdate.HotFixID)" `
+                    'INFO'
 
-            $Script:SecurityPass++
+                Write-Log `
+                    "Latest Installed Date: $($latestUpdate.InstalledOn)" `
+                    'INFO'
+            }
         }
     }
     catch {
-        Write-Log "Error checking Windows Update: $($_.Exception.Message)" 'ERROR'
+        Write-Log `
+            -Message "Error checking Windows Update: $($_.Exception.Message)" `
+            -Level 'ERROR'
+
         $Script:SecurityIssuesFound++
     }
 
@@ -281,49 +436,68 @@ function Audit-UserAccounts {
     Show-Separator
 
     try {
-        $Users = @(Get-LocalUser -ErrorAction Stop)
-        $Administrators = @(
+        $users = @(Get-LocalUser -ErrorAction Stop)
+
+        $administrators = @(
             Get-LocalGroupMember `
                 -Group 'Administrators' `
                 -ErrorAction SilentlyContinue
         )
 
-        Write-Log "Total Local User Accounts: $($Users.Count)" 'INFO'
+        Write-Log `
+            "Total Local User Accounts: $($users.Count)" `
+            'INFO'
 
-        foreach ($User in $Users) {
-            Write-Log "User: $($User.Name)" 'INFO'
-            Write-Log "Enabled: $($User.Enabled)" `
-                (Get-StatusLevel -Success ([bool]$User.Enabled) 'WARNING')
+        foreach ($user in $users) {
+            Write-Log `
+                "User: $($user.Name)" `
+                'INFO'
 
-            if ($User.LastLogon) {
-                Write-Log "Last Logon: $($User.LastLogon)" 'INFO'
+            Write-Log `
+                "Enabled: $($user.Enabled)" `
+                (Get-StatusLevel `
+                    -Success ([bool]$user.Enabled) `
+                    -FailureLevel 'WARNING')
+
+            if ($null -ne $user.LastLogon) {
+                Write-Log `
+                    "Last Logon: $($user.LastLogon)" `
+                    'INFO'
             }
             else {
-                Write-Log 'Last Logon: Never or unavailable' 'INFO'
+                Write-Log `
+                    'Last Logon: Never or unavailable' `
+                    'INFO'
             }
 
-            $IsAdministrator = $false
+            $isAdministrator = $false
 
-            foreach ($Member in $Administrators) {
-                if ($Member.Name -match "\\$([regex]::Escape($User.Name))$" -or
-                    $Member.Name -eq $User.Name) {
-                    $IsAdministrator = $true
+            foreach ($member in $administrators) {
+                if (
+                    $member.Name -match "\\$([regex]::Escape($user.Name))$" -or
+                    $member.Name -eq $user.Name
+                ) {
+                    $isAdministrator = $true
                     break
                 }
             }
 
-            if ($IsAdministrator) {
-                Write-Log 'Member of local Administrators group.' 'WARNING'
+            if ($isAdministrator) {
+                Write-Log `
+                    'Member of local Administrators group.' `
+                    'WARNING'
+
                 $Script:SecurityWarnings++
             }
-
-            Write-Log '' 'INFO'
         }
 
         $Script:SecurityPass++
     }
     catch {
-        Write-Log "Error auditing user accounts: $($_.Exception.Message)" 'ERROR'
+        Write-Log `
+            -Message "Error auditing user accounts: $($_.Exception.Message)" `
+            -Level 'ERROR'
+
         $Script:SecurityIssuesFound++
     }
 
@@ -334,59 +508,80 @@ function Check-PasswordPolicy {
     Write-Log 'PASSWORD POLICY AUDIT' 'INFO'
     Show-Separator
 
-    $TempPolicyFile = $null
+    $temporaryPolicyFile = $null
 
     try {
-        Write-Log 'Exporting local security policy...' 'INFO'
-
-        $TempPolicyFile = Join-Path `
+        $temporaryPolicyFile = Join-Path `
             -Path ([System.IO.Path]::GetTempPath()) `
-            -ChildPath "SecurityPolicy_$([guid]::NewGuid().ToString('N')).inf"
+            -ChildPath (
+                'SecurityPolicy_{0}.inf' -f `
+                    ([guid]::NewGuid().ToString('N'))
+            )
 
-        $SeceditOutput = secedit.exe `
+        Write-Log `
+            'Exporting local security policy...' `
+            'INFO'
+
+        $null = secedit.exe `
             /export `
-            /cfg $TempPolicyFile `
+            /cfg $temporaryPolicyFile `
             /quiet 2>&1
 
-        if (-not (Test-Path -Path $TempPolicyFile)) {
-            Write-Log 'Unable to export local security policy.' 'WARNING'
+        if (-not (Test-Path -LiteralPath $temporaryPolicyFile)) {
+            Write-Log `
+                'Unable to export local security policy.' `
+                'WARNING'
+
             $Script:SecurityWarnings++
             return
         }
 
-        $PolicyContent = Get-Content -Path $TempPolicyFile `
+        $policyContent = Get-Content `
+            -LiteralPath $temporaryPolicyFile `
             -ErrorAction Stop
 
-        $PolicyItems = @(
-            'MinimumPasswordLength',
-            'MaximumPasswordAge',
-            'MinimumPasswordAge',
-            'PasswordHistorySize',
-            'PasswordComplexity',
-            'LockoutBadCount',
-            'LockoutDuration',
+        $policyItems = @(
+            'MinimumPasswordLength'
+            'MaximumPasswordAge'
+            'MinimumPasswordAge'
+            'PasswordHistorySize'
+            'PasswordComplexity'
+            'LockoutBadCount'
+            'LockoutDuration'
             'ResetLockoutCount'
         )
 
-        foreach ($Item in $PolicyItems) {
-            $Match = $PolicyContent |
-                Select-String -Pattern "^\s*$Item\s*=" |
+        foreach ($item in $policyItems) {
+            $match = $policyContent |
+                Select-String `
+                    -Pattern "^\s*$item\s*=" `
+                    -SimpleMatch:$false |
                 Select-Object -First 1
 
-            if ($null -ne $Match) {
-                Write-Log $Match.Line.Trim() 'INFO'
+            if ($null -ne $match) {
+                Write-Log `
+                    $match.Line.Trim() `
+                    'INFO'
             }
         }
 
         $Script:SecurityPass++
     }
     catch {
-        Write-Log "Error checking password policy: $($_.Exception.Message)" 'WARNING'
+        Write-Log `
+            -Message "Error checking password policy: $($_.Exception.Message)" `
+            -Level 'WARNING'
+
         $Script:SecurityWarnings++
     }
     finally {
-        if ($TempPolicyFile -and (Test-Path -Path $TempPolicyFile)) {
-            Remove-Item -Path $TempPolicyFile -Force `
+        if (
+            $null -ne $temporaryPolicyFile -and
+            (Test-Path -LiteralPath $temporaryPolicyFile)
+        ) {
+            Remove-Item `
+                -LiteralPath $temporaryPolicyFile `
+                -Force `
                 -ErrorAction SilentlyContinue
         }
     }
@@ -399,33 +594,59 @@ function Check-AdministratorAccount {
     Show-Separator
 
     try {
-        $AdminAccount = Get-LocalUser -Name 'Administrator' `
+        $adminAccount = Get-LocalUser `
+            -Name 'Administrator' `
             -ErrorAction SilentlyContinue
 
-        if ($null -eq $AdminAccount) {
-            Write-Log 'Built-in Administrator account was not found.' 'INFO'
+        if ($null -eq $adminAccount) {
+            Write-Log `
+                'Built-in Administrator account was not found.' `
+                'INFO'
+
             $Script:SecurityPass++
             return
         }
 
-        Write-Log "Administrator Account Found: $($AdminAccount.Name)" 'INFO'
-        Write-Log "Enabled: $($AdminAccount.Enabled)" `
-            (Get-StatusLevel -Success (-not [bool]$AdminAccount.Enabled))
+        Write-Log `
+            "Administrator Account Found: $($adminAccount.Name)" `
+            'INFO'
 
-        Write-Log "Last Logon: $($AdminAccount.LastLogon)" 'INFO'
+        Write-Log `
+            "Enabled: $($adminAccount.Enabled)" `
+            (Get-StatusLevel `
+                -Success (-not [bool]$adminAccount.Enabled) `
+                -FailureLevel 'WARNING')
 
-        if ($AdminAccount.Enabled) {
-            Write-Log 'Built-in Administrator account is enabled.' 'ERROR'
-            Write-Log 'Consider disabling it if it is not required.' 'WARNING'
+        if ($null -ne $adminAccount.LastLogon) {
+            Write-Log `
+                "Last Logon: $($adminAccount.LastLogon)" `
+                'INFO'
+        }
+
+        if ($adminAccount.Enabled) {
+            Write-Log `
+                'Built-in Administrator account is enabled.' `
+                'ERROR'
+
+            Write-Log `
+                'Consider disabling it if it is not required.' `
+                'WARNING'
+
             $Script:SecurityIssuesFound++
         }
         else {
-            Write-Log 'Built-in Administrator account is disabled.' 'SUCCESS'
+            Write-Log `
+                'Built-in Administrator account is disabled.' `
+                'SUCCESS'
+
             $Script:SecurityPass++
         }
     }
     catch {
-        Write-Log "Error checking Administrator account: $($_.Exception.Message)" 'ERROR'
+        Write-Log `
+            -Message "Error checking Administrator account: $($_.Exception.Message)" `
+            -Level 'ERROR'
+
         $Script:SecurityIssuesFound++
     }
 
@@ -437,45 +658,56 @@ function Scan-SecurityEventLog {
     Show-Separator
 
     try {
-        $StartDate = (Get-Date).AddDays(-7)
+        $startDate = (Get-Date).AddDays(-7)
 
-        $FailedLogons = @(
+        $failedLogons = @(
             Get-WinEvent `
                 -FilterHashtable @{
                     LogName   = 'Security'
                     Id        = 4625
-                    StartTime = $StartDate
+                    StartTime = $startDate
                 } `
                 -ErrorAction SilentlyContinue
         )
 
-        $FailedCount = $FailedLogons.Count
+        $failedCount = $failedLogons.Count
 
-        Write-Log "Failed Logon Attempts - Last 7 Days: $FailedCount" `
-            (Get-StatusLevel -Success ($FailedCount -le 10) 'WARNING')
+        Write-Log `
+            -Message "Failed Logon Attempts - Last 7 Days: $failedCount" `
+            -Level (Get-StatusLevel `
+                -Success ($failedCount -le 10) `
+                -FailureLevel 'WARNING')
 
-        if ($FailedCount -gt 10) {
-            Write-Log 'High number of failed logon attempts detected.' 'WARNING'
+        if ($failedCount -gt 10) {
+            Write-Log `
+                'High number of failed logon attempts detected.' `
+                'WARNING'
+
             $Script:SecurityWarnings++
         }
         else {
             $Script:SecurityPass++
         }
 
-        $AuditFailures = @(
+        $auditEvents = @(
             Get-WinEvent `
                 -FilterHashtable @{
                     LogName   = 'Security'
                     Id        = 4625, 4719, 1102
-                    StartTime = $StartDate
+                    StartTime = $startDate
                 } `
                 -ErrorAction SilentlyContinue
         )
 
-        Write-Log "Selected Security Events - Last 7 Days: $($AuditFailures.Count)" 'INFO'
+        Write-Log `
+            "Selected Security Events - Last 7 Days: $($auditEvents.Count)" `
+            'INFO'
     }
     catch {
-        Write-Log "Could not retrieve Security event logs: $($_.Exception.Message)" 'WARNING'
+        Write-Log `
+            -Message "Could not retrieve Security event logs: $($_.Exception.Message)" `
+            -Level 'WARNING'
+
         $Script:SecurityWarnings++
     }
 
@@ -487,33 +719,60 @@ function Check-BitLocker {
     Show-Separator
 
     try {
-        $Volumes = @(Get-BitLockerVolume -ErrorAction SilentlyContinue)
+        $volumes = @(
+            Get-BitLockerVolume `
+                -ErrorAction SilentlyContinue
+        )
 
-        if ($Volumes.Count -eq 0) {
-            Write-Log 'BitLocker information is unavailable or no volumes were found.' 'INFO'
+        if ($volumes.Count -eq 0) {
+            Write-Log `
+                'BitLocker information is unavailable or no volumes were found.' `
+                'WARNING'
+
+            $Script:SecurityWarnings++
             return
         }
 
-        foreach ($Volume in $Volumes) {
-            Write-Log "Drive: $($Volume.MountPoint)" 'INFO'
-            Write-Log "Protection Status: $($Volume.ProtectionStatus)" 'INFO'
-            Write-Log "Volume Status: $($Volume.VolumeStatus)" 'INFO'
-            Write-Log "Encryption Percentage: $($Volume.EncryptionPercentage)%" 'INFO'
+        foreach ($volume in $volumes) {
+            Write-Log `
+                "Drive: $($volume.MountPoint)" `
+                'INFO'
 
-            $Protected = "$($Volume.ProtectionStatus)" -eq 'On'
+            Write-Log `
+                "Protection Status: $($volume.ProtectionStatus)" `
+                'INFO'
 
-            if ($Protected) {
-                Write-Log 'BitLocker protection is enabled.' 'SUCCESS'
+            Write-Log `
+                "Volume Status: $($volume.VolumeStatus)" `
+                'INFO'
+
+            Write-Log `
+                "Encryption Percentage: $($volume.EncryptionPercentage)%" `
+                'INFO'
+
+            $protected = "$($volume.ProtectionStatus)" -eq 'On'
+
+            if ($protected) {
+                Write-Log `
+                    'BitLocker protection is enabled.' `
+                    'SUCCESS'
+
                 $Script:SecurityPass++
             }
             else {
-                Write-Log 'BitLocker protection is not enabled.' 'WARNING'
+                Write-Log `
+                    'BitLocker protection is not enabled.' `
+                    'WARNING'
+
                 $Script:SecurityWarnings++
             }
         }
     }
     catch {
-        Write-Log "Error checking BitLocker status: $($_.Exception.Message)" 'WARNING'
+        Write-Log `
+            -Message "Error checking BitLocker status: $($_.Exception.Message)" `
+            -Level 'WARNING'
+
         $Script:SecurityWarnings++
     }
 
@@ -525,28 +784,36 @@ function Check-UserAccountControl {
     Show-Separator
 
     try {
-        $UacPath = 'HKLM:\Software\Microsoft\Windows\CurrentVersion\Policies\System'
+        $uacPath =
+            'HKLM:\Software\Microsoft\Windows\CurrentVersion\Policies\System'
 
-        $Uac = Get-ItemProperty `
-            -Path $UacPath `
-            -Name EnableLUA `
+        $uac = Get-ItemProperty `
+            -Path $uacPath `
+            -Name 'EnableLUA' `
             -ErrorAction Stop
 
-        $UacEnabled = $Uac.EnableLUA -eq 1
+        $uacEnabled = $uac.EnableLUA -eq 1
 
-        Write-Log "UAC Enabled: $UacEnabled" `
-            (Get-StatusLevel -Success $UacEnabled)
+        Write-Log `
+            -Message "UAC Enabled: $uacEnabled" `
+            -Level (Get-StatusLevel -Success $uacEnabled)
 
-        if ($UacEnabled) {
+        if ($uacEnabled) {
             $Script:SecurityPass++
         }
         else {
-            Write-Log 'User Account Control is disabled.' 'ERROR'
+            Write-Log `
+                'User Account Control is disabled.' `
+                'ERROR'
+
             $Script:SecurityIssuesFound++
         }
     }
     catch {
-        Write-Log "Error checking UAC status: $($_.Exception.Message)" 'WARNING'
+        Write-Log `
+            -Message "Error checking UAC status: $($_.Exception.Message)" `
+            -Level 'WARNING'
+
         $Script:SecurityWarnings++
     }
 
@@ -559,75 +826,115 @@ function Show-SecurityReport {
     Write-Log 'SECURITY AUDIT SUMMARY REPORT' 'INFO'
     Show-Separator
 
-    Write-Log "Security Issues Found: $($Script:SecurityIssuesFound)" `
-        (Get-StatusLevel `
+    Write-Log `
+        -Message "Security Issues Found: $($Script:SecurityIssuesFound)" `
+        -Level (Get-StatusLevel `
             -Success ($Script:SecurityIssuesFound -eq 0))
 
-    Write-Log "Security Warnings: $($Script:SecurityWarnings)" `
-        (Get-StatusLevel `
+    Write-Log `
+        -Message "Security Warnings: $($Script:SecurityWarnings)" `
+        -Level (Get-StatusLevel `
             -Success ($Script:SecurityWarnings -eq 0) `
             -FailureLevel 'WARNING')
 
-    Write-Log "Security Checks Passed: $($Script:SecurityPass)" 'SUCCESS'
+    Write-Log `
+        "Security Checks Passed: $($Script:SecurityPass)" `
+        'SUCCESS'
 
-    $TotalChecks =
+    $totalChecks =
         $Script:SecurityIssuesFound +
         $Script:SecurityWarnings +
         $Script:SecurityPass
 
-    if ($TotalChecks -gt 0) {
-        $SecurityScore = [math]::Round(
-            ($Script:SecurityPass / $TotalChecks) * 100,
+    if ($totalChecks -gt 0) {
+        $securityScore = [math]::Round(
+            ($Script:SecurityPass / $totalChecks) * 100,
             0
         )
 
-        if ($SecurityScore -ge 80) {
-            $ScoreLevel = 'SUCCESS'
+        if ($securityScore -ge 80) {
+            $scoreLevel = 'SUCCESS'
         }
-        elseif ($SecurityScore -ge 60) {
-            $ScoreLevel = 'WARNING'
+        elseif ($securityScore -ge 60) {
+            $scoreLevel = 'WARNING'
         }
         else {
-            $ScoreLevel = 'ERROR'
+            $scoreLevel = 'ERROR'
         }
-
-        Write-Log "Overall Security Score: $SecurityScore%" $ScoreLevel
     }
+    else {
+        $securityScore = 0
+        $scoreLevel = 'WARNING'
+    }
+
+    Write-Log `
+        "Overall Security Score: $securityScore%" `
+        $scoreLevel
 
     Write-Log '' 'INFO'
     Write-Log 'RECOMMENDATIONS:' 'INFO'
 
     if ($Script:SecurityIssuesFound -gt 0) {
-        Write-Log 'Address critical security issues immediately.' 'ERROR'
-        Write-Log 'Review the ERROR entries in this report.' 'ERROR'
+        Write-Log `
+            'Address critical security issues immediately.' `
+            'ERROR'
+
+        Write-Log `
+            'Review the ERROR entries in this report.' `
+            'ERROR'
     }
 
     if ($Script:SecurityWarnings -gt 0) {
-        Write-Log 'Review and address security warnings.' 'WARNING'
+        Write-Log `
+            'Review and address security warnings.' `
+            'WARNING'
     }
 
-    Write-Log 'Keep Windows and security software updated.' 'INFO'
-    Write-Log 'Run full antivirus scans regularly.' 'INFO'
-    Write-Log 'Review security event logs periodically.' 'INFO'
-    Write-Log 'Use strong, unique passwords.' 'INFO'
+    Write-Log `
+        'Keep Windows and security software updated.' `
+        'INFO'
 
-    Show-Separator
+    Write-Log `
+        'Run full antivirus scans regularly.' `
+        'INFO'
+
+    Write-Log `
+        'Review security event logs periodically.' `
+        'INFO'
+
+    Write-Log `
+        'Use strong, unique passwords.' `
+        'INFO'
 }
 
 function Main {
     try {
-        if (-not (Test-Path -Path $LogPath)) {
-            New-Item -ItemType Directory -Path $LogPath -Force |
+        if (-not (Test-Path -LiteralPath $LogPath)) {
+            New-Item `
+                -ItemType Directory `
+                -Path $LogPath `
+                -Force `
+                -ErrorAction Stop |
                 Out-Null
         }
 
-        New-Item -ItemType File -Path $LogFile -Force |
+        New-Item `
+            -ItemType File `
+            -Path $LogFile `
+            -Force `
+            -ErrorAction Stop |
             Out-Null
 
-        Write-Log '================================================================' 'INFO'
+        Show-Separator
         Write-Log 'SYSTEM SECURITY AUDIT SCRIPT' 'INFO'
-        Write-Log "Started: $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')" 'INFO'
-        Write-Log "Log File: $LogFile" 'INFO'
+        Write-Log `
+            "Started: $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')" `
+            'INFO'
+
+        Write-Log `
+            "Log File: $LogFile" `
+            'INFO'
+
         Show-Separator
 
         Write-Log 'PHASE 1: ANTIVIRUS PROTECTION' 'INFO'
@@ -668,16 +975,26 @@ function Main {
 
         Show-SecurityReport
 
-        Write-Log "Completed: $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')" 'INFO'
-        Write-Log "Log file saved to: $LogFile" 'INFO'
-        Write-Log '================================================================' 'INFO'
+        Write-Log `
+            "Completed: $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')" `
+            'INFO'
+
+        Write-Log `
+            "Log file saved to: $LogFile" `
+            'INFO'
+
+        Show-Separator
 
         Write-Host ''
-        Write-Host "Audit complete. Log saved to: $LogFile" `
+        Write-Host `
+            "Audit complete. Log saved to: $LogFile" `
             -ForegroundColor Cyan
     }
     catch {
-        Write-Log "Fatal script error: $($_.Exception.Message)" 'ERROR'
+        Write-Host `
+            "Fatal script error: $($_.Exception.Message)" `
+            -ForegroundColor Red
+
         throw
     }
 }
