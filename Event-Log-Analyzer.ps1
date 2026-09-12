@@ -1,440 +1,791 @@
 <#
 .SYNOPSIS
-    Event Log Analyzer Script
+    Windows Event Log Analyzer
 
 .DESCRIPTION
-    Analyzes Windows System, Security, and Application event logs for:
+    Analyzes the Windows System, Application, and Security event logs for:
+
     - Errors and warnings
     - Failed and successful logons
-    - System crashes
+    - System crashes and unexpected shutdowns
     - Windows service failures
     - Common error sources
 
-    Results are written to C:\temp.
+    Results are written to C:\temp by default.
 
 .NOTES
-    Requires Administrator privileges.
+    Requires Windows PowerShell 5.1 or PowerShell 7+
+    Requires Administrator privileges
 #>
 
 #Requires -RunAsAdministrator
 
-# ========== CONFIGURATION ==========
+Set-StrictMode -Version Latest
+$ErrorActionPreference = 'Stop'
+
+# ============================================================================
+# CONFIGURATION
+# ============================================================================
 
 $LogPath = 'C:\temp'
+$DaysToAnalyze = 7
+$MaxEventsToAnalyze = 10000
+$FailedLogonWarningThreshold = 10
 
 $TimeStamp = Get-Date -Format 'yyyyMMdd_HHmmss'
 
-$LogFile = Join-Path -Path $LogPath -ChildPath "EventLogAnalysis_$TimeStamp.log"
-$ReportFile = Join-Path -Path $LogPath -ChildPath "EventLogReport_$TimeStamp.html"
-$CSVExportFile = Join-Path -Path $LogPath -ChildPath "EventLogExport_$TimeStamp.csv"
+$LogFile = Join-Path `
+    -Path $LogPath `
+    -ChildPath "EventLogAnalysis_$TimeStamp.log"
 
-$DaysToAnalyze = 7
-$MaxEventsToAnalyze = 10000
+$ReportFile = Join-Path `
+    -Path $LogPath `
+    -ChildPath "EventLogReport_$TimeStamp.html"
+
+$CSVExportFile = Join-Path `
+    -Path $LogPath `
+    -ChildPath "EventLogExport_$TimeStamp.csv"
+
+# ============================================================================
+# GLOBAL STATISTICS
+# ============================================================================
 
 $Script:CriticalErrorsCount = 0
 $Script:WarningsCount = 0
 $Script:InfoCount = 0
-$Script:SuccessAuditCount = 0
+$Script:SuccessLogonCount = 0
+$Script:AnalysisErrors = 0
+$Script:EventsRead = 0
+$Script:CrashCount = 0
+$Script:ServiceFailureCount = 0
 
-# Create output directory if required
+# Ensure output directory exists
 if (-not (Test-Path -LiteralPath $LogPath)) {
-    New-Item -ItemType Directory -Path $LogPath -Force | Out-Null
+    New-Item `
+        -ItemType Directory `
+        -Path $LogPath `
+        -Force |
+        Out-Null
 }
 
-# ========== FUNCTIONS ==========
+# ============================================================================
+# LOGGING FUNCTIONS
+# ============================================================================
 
 function Write-Log {
+    [CmdletBinding()]
     param(
-        [Parameter(Mandatory = $true)]
-        [string]$Message,
+        [AllowEmptyString()]
+        [string]$Message = '',
 
         [ValidateSet('INFO', 'WARNING', 'ERROR', 'SUCCESS')]
         [string]$Level = 'INFO'
     )
 
-    $timestamp = Get-Date -Format 'yyyy-MM-dd HH:mm:ss'
-    $logMessage = "[$timestamp] [$Level] $Message"
+    $TimestampText = Get-Date -Format 'yyyy-MM-dd HH:mm:ss'
+
+    # Keep blank log entries as clean separator lines
+    if ([string]::IsNullOrWhiteSpace($Message)) {
+        $LogMessage = "[$TimestampText] [$Level]"
+    }
+    else {
+        $LogMessage = "[$TimestampText] [$Level] $Message"
+    }
 
     switch ($Level) {
         'INFO' {
-            Write-Host $logMessage -ForegroundColor White
+            Write-Host $LogMessage -ForegroundColor White
         }
 
         'WARNING' {
-            Write-Host $logMessage -ForegroundColor Yellow
+            Write-Host $LogMessage -ForegroundColor Yellow
         }
 
         'ERROR' {
-            Write-Host $logMessage -ForegroundColor Red
+            Write-Host $LogMessage -ForegroundColor Red
         }
 
         'SUCCESS' {
-            Write-Host $logMessage -ForegroundColor Green
+            Write-Host $LogMessage -ForegroundColor Green
         }
     }
 
-    Add-Content -LiteralPath $LogFile -Value $logMessage -ErrorAction SilentlyContinue
+    try {
+        Add-Content `
+            -LiteralPath $LogFile `
+            -Value $LogMessage `
+            -Encoding UTF8 `
+            -ErrorAction Stop
+    }
+    catch {
+        Write-Host "Unable to write to log file: $($_.Exception.Message)" `
+            -ForegroundColor Red
+    }
+}
+
+function Write-LogBlank {
+    Write-Log -Message '' -Level 'INFO'
 }
 
 function Show-Separator {
     Write-Log '================================================================' 'INFO'
 }
 
+# ============================================================================
+# EVENT HELPERS
+# ============================================================================
+
+function Get-RecentEvents {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$LogName,
+
+        [Parameter(Mandatory = $true)]
+        [datetime]$Since,
+
+        [Parameter(Mandatory = $true)]
+        [int]$Maximum
+    )
+
+    try {
+        $Events = @(
+            Get-WinEvent -FilterHashtable @{
+                LogName   = $LogName
+                StartTime = $Since
+            } `
+            -MaxEvents $Maximum `
+            -ErrorAction Stop
+        )
+
+        return $Events
+    }
+    catch {
+        $Script:AnalysisErrors++
+
+        Write-Log `
+            "Unable to read the $LogName event log: $($_.Exception.Message)" `
+            'ERROR'
+
+        return @()
+    }
+}
+
+function Get-EventMessage {
+    param(
+        [Parameter(Mandatory = $false)]
+        $Event
+    )
+
+    if ($null -eq $Event) {
+        return '[No event message available]'
+    }
+
+    try {
+        $Message = [string]$Event.Message
+    }
+    catch {
+        $Message = ''
+    }
+
+    if ([string]::IsNullOrWhiteSpace($Message)) {
+        return '[No event message available]'
+    }
+
+    return $Message
+}
+
+function Get-EventProvider {
+    param(
+        [Parameter(Mandatory = $false)]
+        $Event
+    )
+
+    if ($null -eq $Event) {
+        return 'Unknown'
+    }
+
+    if (-not [string]::IsNullOrWhiteSpace([string]$Event.ProviderName)) {
+        return [string]$Event.ProviderName
+    }
+
+    return 'Unknown'
+}
+
+function Get-EventLevel {
+    param(
+        [Parameter(Mandatory = $false)]
+        $Event
+    )
+
+    if ($null -eq $Event) {
+        return 'Unknown'
+    }
+
+    if (-not [string]::IsNullOrWhiteSpace([string]$Event.LevelDisplayName)) {
+        return [string]$Event.LevelDisplayName
+    }
+
+    return 'Unknown'
+}
+
+function Get-EventIdValue {
+    param(
+        [Parameter(Mandatory = $false)]
+        $Event
+    )
+
+    if ($null -eq $Event) {
+        return 0
+    }
+
+    return [int]$Event.Id
+}
+
+function Get-EventTime {
+    param(
+        [Parameter(Mandatory = $false)]
+        $Event
+    )
+
+    if ($null -eq $Event) {
+        return ''
+    }
+
+    if ($null -eq $Event.TimeCreated) {
+        return ''
+    }
+
+    return $Event.TimeCreated
+}
+
+function Get-ShortText {
+    param(
+        [AllowEmptyString()]
+        [string]$Text = '',
+
+        [int]$MaximumLength = 120
+    )
+
+    if ([string]::IsNullOrWhiteSpace($Text)) {
+        return '[No information available]'
+    }
+
+    if ($Text.Length -gt $MaximumLength) {
+        return $Text.Substring(0, $MaximumLength) + '...'
+    }
+
+    return $Text
+}
+
+# ============================================================================
+# SYSTEM LOG ANALYSIS
+# ============================================================================
+
 function Analyze-SystemLog {
     Write-Log 'ANALYZING SYSTEM EVENT LOG' 'INFO'
     Show-Separator
 
     try {
-        $cutoffDate = (Get-Date).AddDays(-$DaysToAnalyze)
+        $CutoffDate = (Get-Date).AddDays(-$DaysToAnalyze)
 
-        Write-Log "Analyzing System events from the last $DaysToAnalyze days..." 'INFO'
-        Write-Log '' 'INFO'
+        Write-Log `
+            "Analyzing System events from the last $DaysToAnalyze days..." `
+            'INFO'
 
-        $systemEvents = @(
-            Get-EventLog `
-                -LogName System `
-                -After $cutoffDate `
-                -ErrorAction SilentlyContinue |
-            Select-Object -First $MaxEventsToAnalyze
+        Write-LogBlank
+
+        $SystemEvents = @(
+            Get-RecentEvents `
+                -LogName 'System' `
+                -Since $CutoffDate `
+                -Maximum $MaxEventsToAnalyze
         )
 
-        if ($systemEvents.Count -eq 0) {
-            Write-Log 'No System events found.' 'INFO'
+        if ($SystemEvents.Count -eq 0) {
+            Write-Log 'No System events found or the log could not be read.' 'WARNING'
             return @()
         }
 
-        Write-Log "Total System Events: $($systemEvents.Count)" 'INFO'
-        Write-Log '' 'INFO'
+        $Script:EventsRead += $SystemEvents.Count
 
-        $errorEvents = @(
-            $systemEvents | Where-Object {
-                $_.EntryType -eq 'Error'
+        Write-Log `
+            "Total System Events: $($SystemEvents.Count)" `
+            'INFO'
+
+        Write-LogBlank
+
+        $ErrorEvents = @(
+            $SystemEvents | Where-Object {
+                (Get-EventLevel $_) -in @('Error', 'Critical')
             }
         )
 
-        $warningEvents = @(
-            $systemEvents | Where-Object {
-                $_.EntryType -eq 'Warning'
+        $WarningEvents = @(
+            $SystemEvents | Where-Object {
+                (Get-EventLevel $_) -eq 'Warning'
             }
         )
 
-        $infoEvents = @(
-            $systemEvents | Where-Object {
-                $_.EntryType -eq 'Information'
+        $InfoEvents = @(
+            $SystemEvents | Where-Object {
+                (Get-EventLevel $_) -in @('Information', 'Verbose')
             }
         )
 
-        Write-Log "Error Events: $($errorEvents.Count)" 'ERROR'
-        Write-Log "Warning Events: $($warningEvents.Count)" 'WARNING'
-        Write-Log "Information Events: $($infoEvents.Count)" 'SUCCESS'
+        Write-Log "System Errors: $($ErrorEvents.Count)" 'ERROR'
+        Write-Log "System Warnings: $($WarningEvents.Count)" 'WARNING'
+        Write-Log "System Information: $($InfoEvents.Count)" 'INFO'
 
-        $Script:CriticalErrorsCount += $errorEvents.Count
-        $Script:WarningsCount += $warningEvents.Count
-        $Script:InfoCount += $infoEvents.Count
+        $Script:CriticalErrorsCount += $ErrorEvents.Count
+        $Script:WarningsCount += $WarningEvents.Count
+        $Script:InfoCount += $InfoEvents.Count
 
-        Write-Log '' 'INFO'
+        Write-LogBlank
 
-        if ($errorEvents.Count -gt 0) {
-            Write-Log 'Top Error Sources:' 'ERROR'
+        if ($ErrorEvents.Count -gt 0) {
+            Write-Log 'Top System Error Sources:' 'ERROR'
 
-            $errorEvents |
-                Group-Object -Property Source |
+            $ErrorEvents |
+                Group-Object -Property ProviderName |
                 Sort-Object -Property Count -Descending |
                 Select-Object -First 5 |
                 ForEach-Object {
-                    Write-Log " - $($_.Name): $($_.Count) errors" 'ERROR'
+                    Write-Log `
+                        " - $($_.Name): $($_.Count) errors" `
+                        'ERROR'
                 }
+
+            Write-LogBlank
         }
 
-        Write-Log '' 'INFO'
+        if ($WarningEvents.Count -gt 0) {
+            Write-Log 'Top System Warning Sources:' 'WARNING'
 
-        if ($warningEvents.Count -gt 0) {
-            Write-Log 'Top Warning Sources:' 'WARNING'
-
-            $warningEvents |
-                Group-Object -Property Source |
+            $WarningEvents |
+                Group-Object -Property ProviderName |
                 Sort-Object -Property Count -Descending |
                 Select-Object -First 5 |
                 ForEach-Object {
-                    Write-Log " - $($_.Name): $($_.Count) warnings" 'WARNING'
+                    Write-Log `
+                        " - $($_.Name): $($_.Count) warnings" `
+                        'WARNING'
                 }
+
+            Write-LogBlank
         }
 
-        Write-Log '' 'INFO'
-
-        return $systemEvents
+        return $SystemEvents
     }
     catch {
-        Write-Log "Error analyzing System log: $($_.Exception.Message)" 'ERROR'
+        $Script:AnalysisErrors++
+
+        Write-Log `
+            "Error analyzing System log: $($_.Exception.Message)" `
+            'ERROR'
+
         return @()
     }
 }
 
-function Analyze-SecurityLog {
-    Write-Log 'ANALYZING SECURITY EVENT LOG' 'INFO'
-    Show-Separator
-
-    try {
-        $cutoffDate = (Get-Date).AddDays(-$DaysToAnalyze)
-
-        Write-Log "Analyzing Security events from the last $DaysToAnalyze days..." 'INFO'
-        Write-Log '' 'INFO'
-
-        $securityEvents = @(
-            Get-EventLog `
-                -LogName Security `
-                -After $cutoffDate `
-                -ErrorAction SilentlyContinue |
-            Select-Object -First $MaxEventsToAnalyze
-        )
-
-        if ($securityEvents.Count -eq 0) {
-            Write-Log 'No Security events found.' 'INFO'
-            return @()
-        }
-
-        Write-Log "Total Security Events: $($securityEvents.Count)" 'INFO'
-        Write-Log '' 'INFO'
-
-        $errorEvents = @(
-            $securityEvents | Where-Object {
-                $_.EntryType -eq 'Error'
-            }
-        )
-
-        $warningEvents = @(
-            $securityEvents | Where-Object {
-                $_.EntryType -eq 'Warning'
-            }
-        )
-
-        $auditSuccess = @(
-            $securityEvents | Where-Object {
-                $_.EventID -eq 4624
-            }
-        )
-
-        $auditFailure = @(
-            $securityEvents | Where-Object {
-                $_.EventID -eq 4625
-            }
-        )
-
-        Write-Log "Security Errors: $($errorEvents.Count)" 'ERROR'
-        Write-Log "Security Warnings: $($warningEvents.Count)" 'WARNING'
-        Write-Log "Successful Logons: $($auditSuccess.Count)" 'SUCCESS'
-
-        if ($auditFailure.Count -gt 10) {
-            Write-Log "Failed Logons: $($auditFailure.Count)" 'ERROR'
-        }
-        else {
-            Write-Log "Failed Logons: $($auditFailure.Count)" 'INFO'
-        }
-
-        $Script:SuccessAuditCount += $auditSuccess.Count
-
-        Write-Log '' 'INFO'
-
-        if ($auditFailure.Count -gt 10) {
-            Write-Log 'HIGH NUMBER OF FAILED LOGON ATTEMPTS DETECTED.' 'ERROR'
-            Write-Log 'This may indicate a security threat or password-guessing attempt.' 'ERROR'
-
-            $failureSources = @(
-                $auditFailure |
-                    Group-Object -Property Source |
-                    Sort-Object -Property Count -Descending
-            )
-
-            if ($failureSources.Count -gt 0) {
-                Write-Log 'Failed Logon Sources:' 'ERROR'
-
-                foreach ($source in ($failureSources | Select-Object -First 5)) {
-                    Write-Log " - $($source.Name): $($source.Count) failed attempts" 'ERROR'
-                }
-            }
-        }
-
-        Write-Log '' 'INFO'
-
-        return $securityEvents
-    }
-    catch {
-        Write-Log "Error analyzing Security log: $($_.Exception.Message)" 'ERROR'
-        return @()
-    }
-}
+# ============================================================================
+# APPLICATION LOG ANALYSIS
+# ============================================================================
 
 function Analyze-ApplicationLog {
     Write-Log 'ANALYZING APPLICATION EVENT LOG' 'INFO'
     Show-Separator
 
     try {
-        $cutoffDate = (Get-Date).AddDays(-$DaysToAnalyze)
+        $CutoffDate = (Get-Date).AddDays(-$DaysToAnalyze)
 
-        Write-Log "Analyzing Application events from the last $DaysToAnalyze days..." 'INFO'
-        Write-Log '' 'INFO'
+        Write-Log `
+            "Analyzing Application events from the last $DaysToAnalyze days..." `
+            'INFO'
 
-        $appEvents = @(
-            Get-EventLog `
-                -LogName Application `
-                -After $cutoffDate `
-                -ErrorAction SilentlyContinue |
-            Select-Object -First $MaxEventsToAnalyze
+        Write-LogBlank
+
+        $ApplicationEvents = @(
+            Get-RecentEvents `
+                -LogName 'Application' `
+                -Since $CutoffDate `
+                -Maximum $MaxEventsToAnalyze
         )
 
-        if ($appEvents.Count -eq 0) {
-            Write-Log 'No Application events found.' 'INFO'
+        if ($ApplicationEvents.Count -eq 0) {
+            Write-Log `
+                'No Application events found or the log could not be read.' `
+                'WARNING'
+
             return @()
         }
 
-        Write-Log "Total Application Events: $($appEvents.Count)" 'INFO'
-        Write-Log '' 'INFO'
+        $Script:EventsRead += $ApplicationEvents.Count
 
-        $errorEvents = @(
-            $appEvents | Where-Object {
-                $_.EntryType -eq 'Error'
+        Write-Log `
+            "Total Application Events: $($ApplicationEvents.Count)" `
+            'INFO'
+
+        Write-LogBlank
+
+        $ErrorEvents = @(
+            $ApplicationEvents | Where-Object {
+                (Get-EventLevel $_) -in @('Error', 'Critical')
             }
         )
 
-        $warningEvents = @(
-            $appEvents | Where-Object {
-                $_.EntryType -eq 'Warning'
+        $WarningEvents = @(
+            $ApplicationEvents | Where-Object {
+                (Get-EventLevel $_) -eq 'Warning'
             }
         )
 
-        $infoEvents = @(
-            $appEvents | Where-Object {
-                $_.EntryType -eq 'Information'
+        $InfoEvents = @(
+            $ApplicationEvents | Where-Object {
+                (Get-EventLevel $_) -in @('Information', 'Verbose')
             }
         )
 
-        Write-Log "Application Errors: $($errorEvents.Count)" 'ERROR'
-        Write-Log "Application Warnings: $($warningEvents.Count)" 'WARNING'
-        Write-Log "Application Information: $($infoEvents.Count)" 'SUCCESS'
+        Write-Log "Application Errors: $($ErrorEvents.Count)" 'ERROR'
+        Write-Log "Application Warnings: $($WarningEvents.Count)" 'WARNING'
+        Write-Log "Application Information: $($InfoEvents.Count)" 'INFO'
 
-        $Script:CriticalErrorsCount += $errorEvents.Count
-        $Script:WarningsCount += $warningEvents.Count
-        $Script:InfoCount += $infoEvents.Count
+        $Script:CriticalErrorsCount += $ErrorEvents.Count
+        $Script:WarningsCount += $WarningEvents.Count
+        $Script:InfoCount += $InfoEvents.Count
 
-        Write-Log '' 'INFO'
+        Write-LogBlank
 
-        if ($errorEvents.Count -gt 0) {
+        if ($ErrorEvents.Count -gt 0) {
             Write-Log 'Applications with the Most Errors:' 'ERROR'
 
-            $errorEvents |
-                Group-Object -Property Source |
+            $ErrorEvents |
+                Group-Object -Property ProviderName |
                 Sort-Object -Property Count -Descending |
                 Select-Object -First 5 |
                 ForEach-Object {
-                    Write-Log " - $($_.Name): $($_.Count) errors" 'ERROR'
+                    Write-Log `
+                        " - $($_.Name): $($_.Count) errors" `
+                        'ERROR'
                 }
+
+            Write-LogBlank
         }
 
-        Write-Log '' 'INFO'
+        if ($WarningEvents.Count -gt 0) {
+            Write-Log 'Applications with the Most Warnings:' 'WARNING'
 
-        return $appEvents
+            $WarningEvents |
+                Group-Object -Property ProviderName |
+                Sort-Object -Property Count -Descending |
+                Select-Object -First 5 |
+                ForEach-Object {
+                    Write-Log `
+                        " - $($_.Name): $($_.Count) warnings" `
+                        'WARNING'
+                }
+
+            Write-LogBlank
+        }
+
+        return $ApplicationEvents
     }
     catch {
-        Write-Log "Error analyzing Application log: $($_.Exception.Message)" 'ERROR'
+        $Script:AnalysisErrors++
+
+        Write-Log `
+            "Error analyzing Application log: $($_.Exception.Message)" `
+            'ERROR'
+
         return @()
     }
 }
+
+# ============================================================================
+# SECURITY LOG ANALYSIS
+# ============================================================================
+
+function Analyze-SecurityLog {
+    Write-Log 'ANALYZING SECURITY EVENT LOG' 'INFO'
+    Show-Separator
+
+    try {
+        $CutoffDate = (Get-Date).AddDays(-$DaysToAnalyze)
+
+        Write-Log `
+            "Analyzing Security events from the last $DaysToAnalyze days..." `
+            'INFO'
+
+        Write-LogBlank
+
+        $SecurityEvents = @(
+            Get-RecentEvents `
+                -LogName 'Security' `
+                -Since $CutoffDate `
+                -Maximum $MaxEventsToAnalyze
+        )
+
+        if ($SecurityEvents.Count -eq 0) {
+            Write-Log `
+                'No Security events found or the log could not be read.' `
+                'WARNING'
+
+            return @()
+        }
+
+        $Script:EventsRead += $SecurityEvents.Count
+
+        Write-Log `
+            "Total Security Events: $($SecurityEvents.Count)" `
+            'INFO'
+
+        Write-LogBlank
+
+        $SecurityErrorEvents = @(
+            $SecurityEvents | Where-Object {
+                (Get-EventLevel $_) -in @('Error', 'Critical')
+            }
+        )
+
+        $SecurityWarningEvents = @(
+            $SecurityEvents | Where-Object {
+                (Get-EventLevel $_) -eq 'Warning'
+            }
+        )
+
+        $SuccessfulLogons = @(
+            $SecurityEvents | Where-Object {
+                (Get-EventIdValue $_) -eq 4624
+            }
+        )
+
+        $FailedLogons = @(
+            $SecurityEvents | Where-Object {
+                (Get-EventIdValue $_) -eq 4625
+            }
+        )
+
+        Write-Log `
+            "Security Errors: $($SecurityErrorEvents.Count)" `
+            'ERROR'
+
+        Write-Log `
+            "Security Warnings: $($SecurityWarningEvents.Count)" `
+            'WARNING'
+
+        Write-Log `
+            "Successful Logons: $($SuccessfulLogons.Count)" `
+            'SUCCESS'
+
+        if ($FailedLogons.Count -gt $FailedLogonWarningThreshold) {
+            Write-Log `
+                "Failed Logons: $($FailedLogons.Count)" `
+                'WARNING'
+        }
+        else {
+            Write-Log `
+                "Failed Logons: $($FailedLogons.Count)" `
+                'INFO'
+        }
+
+        $Script:SuccessLogonCount += $SuccessfulLogons.Count
+        $Script:CriticalErrorsCount += $SecurityErrorEvents.Count
+        $Script:WarningsCount += $SecurityWarningEvents.Count
+
+        Write-LogBlank
+
+        if ($FailedLogons.Count -gt $FailedLogonWarningThreshold) {
+            Write-Log `
+                'HIGH NUMBER OF FAILED LOGON ATTEMPTS DETECTED.' `
+                'WARNING'
+
+            Write-Log `
+                'This may indicate password guessing or a misconfigured service.' `
+                'WARNING'
+
+            Write-LogBlank
+
+            Write-Log 'Failed Logon Sources:' 'WARNING'
+
+            $FailedLogons |
+                Group-Object -Property ProviderName |
+                Sort-Object -Property Count -Descending |
+                Select-Object -First 5 |
+                ForEach-Object {
+                    Write-Log `
+                        " - $($_.Name): $($_.Count) failed events" `
+                        'WARNING'
+                }
+
+            Write-LogBlank
+        }
+
+        return $SecurityEvents
+    }
+    catch {
+        $Script:AnalysisErrors++
+
+        Write-Log `
+            "Error analyzing Security log: $($_.Exception.Message)" `
+            'ERROR'
+
+        return @()
+    }
+}
+
+# ============================================================================
+# CRASH DETECTION
+# ============================================================================
 
 function Detect-CrashEvents {
     Write-Log 'DETECTING SYSTEM CRASHES' 'INFO'
     Show-Separator
 
     try {
-        $cutoffDate = (Get-Date).AddDays(-$DaysToAnalyze)
+        $CutoffDate = (Get-Date).AddDays(-$DaysToAnalyze)
 
-        $crashEvents = @(
-            Get-EventLog `
-                -LogName System `
-                -After $cutoffDate `
-                -ErrorAction SilentlyContinue |
-            Where-Object {
-                $_.EventID -in @(41, 1001, 6008)
-            }
+        $CrashEvents = @(
+            Get-WinEvent -FilterHashtable @{
+                LogName   = 'System'
+                StartTime = $CutoffDate
+                Id        = 41, 6008
+            } `
+            -MaxEvents 100 `
+            -ErrorAction Stop
         )
 
-        if ($crashEvents.Count -eq 0) {
+        $WerEvents = @(
+            Get-WinEvent -FilterHashtable @{
+                LogName   = 'Application'
+                StartTime = $CutoffDate
+                Id        = 1001
+            } `
+            -MaxEvents 100 `
+            -ErrorAction Stop
+        )
+
+        $AllCrashEvents = @(
+            $CrashEvents + $WerEvents
+        )
+
+        $Script:CrashCount = $AllCrashEvents.Count
+
+        if ($AllCrashEvents.Count -eq 0) {
             Write-Log 'No system crashes detected.' 'SUCCESS'
             return
         }
 
-        Write-Log "SYSTEM CRASHES DETECTED: $($crashEvents.Count)" 'ERROR'
-        Write-Log '' 'INFO'
+        Write-Log `
+            "SYSTEM CRASH OR WER EVENTS DETECTED: $($AllCrashEvents.Count)" `
+            'ERROR'
 
-        foreach ($crash in ($crashEvents | Select-Object -First 10)) {
-            $message = [string]$crash.Message
+        Write-LogBlank
 
-            if ($message.Length -gt 100) {
-                $message = $message.Substring(0, 100)
-            }
+        foreach ($Crash in ($AllCrashEvents | Select-Object -First 10)) {
+            $Message = Get-EventMessage $Crash
+            $Message = Get-ShortText -Text $Message -MaximumLength 150
 
-            Write-Log "Crash Event ID: $($crash.EventID)" 'ERROR'
-            Write-Log "Time: $($crash.TimeGenerated)" 'INFO'
-            Write-Log "Source: $($crash.Source)" 'INFO'
-            Write-Log "Message: $message" 'INFO'
-            Write-Log '' 'INFO'
+            Write-Log `
+                "Event ID: $(Get-EventIdValue $Crash)" `
+                'ERROR'
+
+            Write-Log `
+                "Time: $(Get-EventTime $Crash)" `
+                'INFO'
+
+            Write-Log `
+                "Provider: $(Get-EventProvider $Crash)" `
+                'INFO'
+
+            Write-Log `
+                "Message: $Message" `
+                'INFO'
+
+            Write-LogBlank
         }
     }
     catch {
-        Write-Log "Error detecting crashes: $($_.Exception.Message)" 'ERROR'
+        $Script:AnalysisErrors++
+
+        Write-Log `
+            "Error detecting crashes: $($_.Exception.Message)" `
+            'ERROR'
     }
 }
+
+# ============================================================================
+# SERVICE FAILURE DETECTION
+# ============================================================================
 
 function Detect-ServiceFailures {
     Write-Log 'DETECTING SERVICE FAILURES' 'INFO'
     Show-Separator
 
     try {
-        $cutoffDate = (Get-Date).AddDays(-$DaysToAnalyze)
+        $CutoffDate = (Get-Date).AddDays(-$DaysToAnalyze)
 
-        $serviceFailures = @(
-            Get-EventLog `
-                -LogName System `
-                -After $cutoffDate `
-                -ErrorAction SilentlyContinue |
-            Where-Object {
-                $_.Source -eq 'Service Control Manager' -and
-                $_.EntryType -eq 'Error'
-            }
+        $ServiceFailures = @(
+            Get-WinEvent -FilterHashtable @{
+                LogName   = 'System'
+                StartTime = $CutoffDate
+                ProviderName = 'Service Control Manager'
+                Level = 2
+            } `
+            -MaxEvents $MaxEventsToAnalyze `
+            -ErrorAction Stop
         )
 
-        if ($serviceFailures.Count -eq 0) {
+        $Script:ServiceFailureCount = $ServiceFailures.Count
+
+        if ($ServiceFailures.Count -eq 0) {
             Write-Log 'No service failures detected.' 'SUCCESS'
             return
         }
 
-        Write-Log "SERVICE FAILURES DETECTED: $($serviceFailures.Count)" 'ERROR'
-        Write-Log '' 'INFO'
+        Write-Log `
+            "SERVICE FAILURES DETECTED: $($ServiceFailures.Count)" `
+            'ERROR'
 
-        $failingServices = @(
-            $serviceFailures |
-                Group-Object -Property Message |
-                Sort-Object -Property Count -Descending
-        )
+        Write-LogBlank
 
-        foreach ($service in ($failingServices | Select-Object -First 5)) {
-            $serviceName = [string]$service.Name
-
-            if ($serviceName.Length -gt 100) {
-                $serviceName = $serviceName.Substring(0, 100)
+        $ServiceFailures |
+            Group-Object -Property Id |
+            Sort-Object -Property Count -Descending |
+            Select-Object -First 10 |
+            ForEach-Object {
+                Write-Log `
+                    "Event ID $($_.Name): $($_.Count) occurrences" `
+                    'ERROR'
             }
 
-            Write-Log "Failed Service/Event: $serviceName" 'ERROR'
-            Write-Log "Failures: $($service.Count)" 'ERROR'
+        Write-LogBlank
+
+        foreach ($Failure in ($ServiceFailures | Select-Object -First 5)) {
+            $Message = Get-EventMessage $Failure
+            $Message = Get-ShortText -Text $Message -MaximumLength 150
+
+            Write-Log `
+                "Service failure: $Message" `
+                'ERROR'
         }
 
-        Write-Log '' 'INFO'
+        Write-LogBlank
     }
     catch {
-        Write-Log "Error detecting service failures: $($_.Exception.Message)" 'ERROR'
+        $Script:AnalysisErrors++
+
+        Write-Log `
+            "Error detecting service failures: $($_.Exception.Message)" `
+            'ERROR'
     }
 }
 
+# ============================================================================
+# CSV EXPORT
+# ============================================================================
+
 function Export-EventsToCSV {
+    [CmdletBinding()]
     param(
         [Parameter(Mandatory = $true)]
         [object[]]$Events,
@@ -449,44 +800,98 @@ function Export-EventsToCSV {
     }
 
     try {
-        $exportRows = $Events |
-            Select-Object TimeGenerated, EntryType, Source, EventID, Message
+        $ExportRows = @(
+            $Events | ForEach-Object {
+                [pscustomobject]@{
+                    LogType       = $LogType
+                    TimeGenerated = Get-EventTime $_
+                    Level         = Get-EventLevel $_
+                    Provider      = Get-EventProvider $_
+                    EventID       = Get-EventIdValue $_
+                    RecordID      = $_.RecordId
+                    MachineName   = $_.MachineName
+                    Message       = Get-EventMessage $_
+                }
+            }
+        )
 
         if (Test-Path -LiteralPath $CSVExportFile) {
-            $exportRows |
+            $ExportRows |
                 Export-Csv `
                     -LiteralPath $CSVExportFile `
                     -Append `
                     -NoTypeInformation `
-                    -Encoding UTF8
+                    -Encoding UTF8 `
+                    -Force
         }
         else {
-            $exportRows |
+            $ExportRows |
                 Export-Csv `
                     -LiteralPath $CSVExportFile `
                     -NoTypeInformation `
-                    -Encoding UTF8
+                    -Encoding UTF8 `
+                    -Force
         }
 
-        Write-Log "$LogType events exported to: $CSVExportFile" 'SUCCESS'
+        Write-Log `
+            "$LogType events exported to: $CSVExportFile" `
+            'SUCCESS'
     }
     catch {
-        Write-Log "Could not export $LogType events to CSV: $($_.Exception.Message)" 'WARNING'
+        Write-Log `
+            "Could not export $LogType events to CSV: $($_.Exception.Message)" `
+            'WARNING'
     }
+}
+
+# ============================================================================
+# HTML REPORT
+# ============================================================================
+
+function ConvertTo-HtmlSafe {
+    param(
+        [AllowEmptyString()]
+        [string]$Text = ''
+    )
+
+    return [System.Net.WebUtility]::HtmlEncode($Text)
 }
 
 function Generate-HTMLReport {
     Write-Log 'Generating HTML report...' 'INFO'
 
     try {
-        $generatedDate = Get-Date -Format 'yyyy-MM-dd HH:mm:ss'
+        $GeneratedDate = Get-Date -Format 'yyyy-MM-dd HH:mm:ss'
 
-        $htmlContent = @"
+        if ($Script:AnalysisErrors -gt 0) {
+            $HealthStatus = 'INCOMPLETE'
+            $HealthClass = 'warning'
+            $HealthMessage = "$($Script:AnalysisErrors) analysis section(s) failed."
+        }
+        elseif ($Script:CriticalErrorsCount -gt 50) {
+            $HealthStatus = 'CRITICAL'
+            $HealthClass = 'error'
+            $HealthMessage = 'A high number of critical or error events was detected.'
+        }
+        elseif ($Script:CriticalErrorsCount -gt 20) {
+            $HealthStatus = 'WARNING'
+            $HealthClass = 'warning'
+            $HealthMessage = 'A significant number of error events was detected.'
+        }
+        else {
+            $HealthStatus = 'OK'
+            $HealthClass = 'success'
+            $HealthMessage = 'Error levels are acceptable.'
+        }
+
+        $HtmlContent = @"
 <!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Event Log Analysis Report</title>
+
 <style>
 body {
     font-family: Arial, sans-serif;
@@ -505,7 +910,7 @@ body {
 
 .section {
     background-color: white;
-    padding: 15px;
+    padding: 20px;
     margin-bottom: 15px;
     border-radius: 5px;
     box-shadow: 0 2px 4px rgba(0,0,0,0.1);
@@ -519,6 +924,7 @@ body {
 
 .stat {
     display: inline-block;
+    min-width: 150px;
     background-color: #f0f0f0;
     padding: 15px 25px;
     margin: 10px 10px 10px 0;
@@ -531,15 +937,15 @@ body {
 }
 
 .warning {
-    color: #d39e00;
+    color: #b07800;
 }
 
 .success {
-    color: #28a745;
+    color: #218838;
 }
 
 .info {
-    color: #17a2b8;
+    color: #117a8b;
 }
 
 .footer {
@@ -550,37 +956,71 @@ body {
 }
 </style>
 </head>
+
 <body>
 
 <div class="header">
     <h1>Event Log Analysis Report</h1>
-    <p>Generated: $generatedDate</p>
-    <p>Analysis Period: Last $DaysToAnalyze days</p>
+    <p>Generated: $(ConvertTo-HtmlSafe $GeneratedDate)</p>
+    <p>Analysis period: Last $DaysToAnalyze days</p>
 </div>
 
 <div class="section">
     <h2>Summary Statistics</h2>
+
     <div class="stat error">
         Errors: $($Script:CriticalErrorsCount)
     </div>
+
     <div class="stat warning">
         Warnings: $($Script:WarningsCount)
     </div>
+
     <div class="stat info">
         Information: $($Script:InfoCount)
     </div>
+
     <div class="stat success">
-        Successful Audits: $($Script:SuccessAuditCount)
+        Successful logons: $($Script:SuccessLogonCount)
+    </div>
+
+    <div class="stat error">
+        Crash events: $($Script:CrashCount)
+    </div>
+
+    <div class="stat error">
+        Service failures: $($Script:ServiceFailureCount)
     </div>
 </div>
 
 <div class="section">
+    <h2>Health Assessment</h2>
+
+    <p class="$HealthClass">
+        <strong>${HealthStatus}:</strong>
+        $(ConvertTo-HtmlSafe $HealthMessage)
+    </p>
+
+    <p>
+        Events read: $($Script:EventsRead)
+    </p>
+
+    <p>
+        Analysis errors: $($Script:AnalysisErrors)
+    </p>
+</div>
+
+<div class="section">
     <h2>Key Findings</h2>
+
     <ul>
         <li>Total errors: $($Script:CriticalErrorsCount)</li>
         <li>Total warnings: $($Script:WarningsCount)</li>
         <li>Total information events: $($Script:InfoCount)</li>
-        <li>Successful logons: $($Script:SuccessAuditCount)</li>
+        <li>Successful logons: $($Script:SuccessLogonCount)</li>
+        <li>Crash or Windows Error Reporting events: $($Script:CrashCount)</li>
+        <li>Service failures: $($Script:ServiceFailureCount)</li>
+        <li>Events read: $($Script:EventsRead)</li>
         <li>Analysis period: $DaysToAnalyze days</li>
         <li>Maximum events per log: $MaxEventsToAnalyze</li>
     </ul>
@@ -588,18 +1028,20 @@ body {
 
 <div class="section">
     <h2>Recommendations</h2>
+
     <ul>
-        <li>Review error events for repeated patterns.</li>
-        <li>Address critical failures immediately.</li>
-        <li>Check application compatibility issues.</li>
-        <li>Monitor failed security events.</li>
-        <li>Update problematic drivers and software.</li>
-        <li>Maintain regular backups.</li>
+        <li>Review repeated error sources and event IDs.</li>
+        <li>Investigate crash and unexpected shutdown events.</li>
+        <li>Review failed logons by source and time.</li>
+        <li>Check applications generating repeated errors.</li>
+        <li>Review failed Windows services and their dependencies.</li>
+        <li>Keep Windows, drivers, and applications updated.</li>
+        <li>Maintain current backups before making system changes.</li>
     </ul>
 </div>
 
 <div class="footer">
-    <p>Event Log Analysis Report</p>
+    Event Log Analysis Report
 </div>
 
 </body>
@@ -608,77 +1050,153 @@ body {
 
         Set-Content `
             -LiteralPath $ReportFile `
-            -Value $htmlContent `
-            -Encoding UTF8
+            -Value $HtmlContent `
+            -Encoding UTF8 `
+            -Force
 
-        Write-Log "HTML report saved to: $ReportFile" 'SUCCESS'
+        Write-Log `
+            "HTML report saved to: $ReportFile" `
+            'SUCCESS'
     }
     catch {
-        Write-Log "Could not generate HTML report: $($_.Exception.Message)" 'WARNING'
+        Write-Log `
+            "Could not generate HTML report: $($_.Exception.Message)" `
+            'WARNING'
     }
 }
+
+# ============================================================================
+# SUMMARY
+# ============================================================================
 
 function Show-AnalysisReport {
-    $totalEvents =
+    $TotalEventsAnalyzed =
         $Script:CriticalErrorsCount +
         $Script:WarningsCount +
-        $Script:InfoCount +
-        $Script:SuccessAuditCount
+        $Script:InfoCount
 
-    Write-Log '' 'INFO'
+    Write-LogBlank
     Show-Separator
+
     Write-Log 'EVENT LOG ANALYSIS SUMMARY REPORT' 'INFO'
+
     Show-Separator
 
-    Write-Log "Analysis Period: Last $DaysToAnalyze days" 'INFO'
-    Write-Log '' 'INFO'
+    Write-Log `
+        "Analysis Period: Last $DaysToAnalyze days" `
+        'INFO'
+
+    Write-LogBlank
 
     Write-Log 'TOTAL EVENTS BY TYPE:' 'INFO'
-    Write-Log "Critical Errors: $($Script:CriticalErrorsCount)" 'ERROR'
-    Write-Log "Warnings: $($Script:WarningsCount)" 'WARNING'
-    Write-Log "Information: $($Script:InfoCount)" 'INFO'
-    Write-Log "Successful Audits: $($Script:SuccessAuditCount)" 'SUCCESS'
-    Write-Log "Total Events Analyzed: $totalEvents" 'INFO'
 
-    Write-Log '' 'INFO'
+    Write-Log `
+        "Critical Errors: $($Script:CriticalErrorsCount)" `
+        'ERROR'
+
+    Write-Log `
+        "Warnings: $($Script:WarningsCount)" `
+        'WARNING'
+
+    Write-Log `
+        "Information: $($Script:InfoCount)" `
+        'INFO'
+
+    Write-Log `
+        "Successful Logons: $($Script:SuccessLogonCount)" `
+        'SUCCESS'
+
+    Write-Log `
+        "Crash Events: $($Script:CrashCount)" `
+        'ERROR'
+
+    Write-Log `
+        "Service Failures: $($Script:ServiceFailureCount)" `
+        'ERROR'
+
+    Write-Log `
+        "Total Events Analyzed: $TotalEventsAnalyzed" `
+        'INFO'
+
+    Write-Log `
+        "Events Read: $($Script:EventsRead)" `
+        'INFO'
+
+    Write-LogBlank
+
     Write-Log 'HEALTH ASSESSMENT:' 'INFO'
 
-    if ($Script:CriticalErrorsCount -gt 50) {
-        Write-Log 'CRITICAL: High number of errors detected.' 'ERROR'
+    if ($Script:AnalysisErrors -gt 0) {
+        Write-Log `
+            "INCOMPLETE: $($Script:AnalysisErrors) analysis section(s) failed." `
+            'ERROR'
+    }
+    elseif ($Script:CriticalErrorsCount -gt 50) {
+        Write-Log `
+            'CRITICAL: High number of errors detected.' `
+            'ERROR'
     }
     elseif ($Script:CriticalErrorsCount -gt 20) {
-        Write-Log 'WARNING: Significant error activity detected.' 'WARNING'
+        Write-Log `
+            'WARNING: Significant error activity detected.' `
+            'WARNING'
     }
     else {
-        Write-Log 'OK: Error levels are acceptable.' 'SUCCESS'
+        Write-Log `
+            'OK: Error levels are acceptable.' `
+            'SUCCESS'
     }
 
-    Write-Log '' 'INFO'
+    Write-LogBlank
+
     Write-Log 'FILES GENERATED:' 'INFO'
-    Write-Log "Text Log: $LogFile" 'SUCCESS'
-    Write-Log "HTML Report: $ReportFile" 'SUCCESS'
-    Write-Log "CSV Export: $CSVExportFile" 'SUCCESS'
+
+    Write-Log `
+        "Text Log: $LogFile" `
+        'SUCCESS'
+
+    Write-Log `
+        "HTML Report: $ReportFile" `
+        'SUCCESS'
+
+    Write-Log `
+        "CSV Export: $CSVExportFile" `
+        'SUCCESS'
 }
+
+# ============================================================================
+# MAIN
+# ============================================================================
 
 function Main {
     Write-Log '================================================================' 'INFO'
     Write-Log 'EVENT LOG ANALYZER SCRIPT' 'INFO'
-    Write-Log "Started: $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')" 'INFO'
-    Write-Log "Output Directory: $LogPath" 'INFO'
-    Write-Log "Log File: $LogFile" 'INFO'
+
+    Write-Log `
+        "Started: $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')" `
+        'INFO'
+
+    Write-Log `
+        "Output Directory: $LogPath" `
+        'INFO'
+
+    Write-Log `
+        "Log File: $LogFile" `
+        'INFO'
+
     Show-Separator
 
     Write-Log 'PHASE 1: SYSTEM LOG ANALYSIS' 'INFO'
     Show-Separator
-    $systemEvents = Analyze-SystemLog
+    $SystemEvents = Analyze-SystemLog
 
     Write-Log 'PHASE 2: APPLICATION LOG ANALYSIS' 'INFO'
     Show-Separator
-    $appEvents = Analyze-ApplicationLog
+    $ApplicationEvents = Analyze-ApplicationLog
 
     Write-Log 'PHASE 3: SECURITY LOG ANALYSIS' 'INFO'
     Show-Separator
-    $securityEvents = Analyze-SecurityLog
+    $SecurityEvents = Analyze-SecurityLog
 
     Write-Log 'PHASE 4: SYSTEM CRASH DETECTION' 'INFO'
     Show-Separator
@@ -691,29 +1209,50 @@ function Main {
     Write-Log 'PHASE 6: EXPORT ANALYSIS DATA' 'INFO'
     Show-Separator
 
-    if ($systemEvents.Count -gt 0) {
-        Export-EventsToCSV -Events $systemEvents -LogType 'System'
+    if ($SystemEvents.Count -gt 0) {
+        Export-EventsToCSV `
+            -Events $SystemEvents `
+            -LogType 'System'
     }
 
-    if ($appEvents.Count -gt 0) {
-        Export-EventsToCSV -Events $appEvents -LogType 'Application'
+    if ($ApplicationEvents.Count -gt 0) {
+        Export-EventsToCSV `
+            -Events $ApplicationEvents `
+            -LogType 'Application'
     }
 
-    if ($securityEvents.Count -gt 0) {
-        Export-EventsToCSV -Events $securityEvents -LogType 'Security'
+    if ($SecurityEvents.Count -gt 0) {
+        Export-EventsToCSV `
+            -Events $SecurityEvents `
+            -LogType 'Security'
     }
 
     Write-Log 'PHASE 7: GENERATE REPORTS' 'INFO'
     Show-Separator
-    Generate-HTMLReport
 
+    Generate-HTMLReport
     Show-AnalysisReport
 
-    Write-Log '' 'INFO'
-    Write-Log "Completed: $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')" 'INFO'
+    Write-LogBlank
+
+    Write-Log `
+        "Completed: $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')" `
+        'INFO'
+
     Write-Log '================================================================' 'INFO'
 }
 
-# ========== RUN SCRIPT ==========
+# ============================================================================
+# RUN SCRIPT
+# ============================================================================
 
-Main
+try {
+    Main
+}
+catch {
+    Write-Log `
+        "Fatal script error: $($_.Exception.Message)" `
+        'ERROR'
+
+    exit 1
+}
