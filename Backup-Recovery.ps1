@@ -1,16 +1,16 @@
 <#
 .SYNOPSIS
-    Backup and Recovery Script
+Backup and Recovery Script
 
 .DESCRIPTION
-    Backs up selected user folders, exports important registry hives,
-    optionally creates a Windows system image, lists backups, and removes
-    backups older than the retention period.
+Backs up selected user folders, exports important registry hives,
+optionally creates a Windows system image, lists backups, and removes
+backups older than the retention period.
 
 .NOTES
-    Requires Administrator privileges.
-    Log file and metadata are stored in C:\temp.
-    System-image backups require a separate destination volume.
+Requires Administrator privileges.
+Log file and metadata are stored in C:\temp.
+System-image backups require a separate destination volume.
 #>
 
 #Requires -Version 5.1
@@ -33,8 +33,6 @@ $Script:BackupsCreated = 0
 $Script:BackupsFailed = 0
 $Script:TotalBackupSize = [int64]0
 
-# Do not include the entire APPDATA folder because it contains
-# temporary files, caches, locked files, and unnecessary data.
 $CriticalFolders = @(
     [Environment]::GetFolderPath('MyDocuments'),
     [Environment]::GetFolderPath('Desktop'),
@@ -49,11 +47,19 @@ $CriticalFolders = @(
 
 function Initialize-Logging {
     if (-not (Test-Path -LiteralPath $LogPath)) {
-        New-Item -ItemType Directory -Path $LogPath -Force | Out-Null
+        New-Item `
+            -ItemType Directory `
+            -Path $LogPath `
+            -Force |
+            Out-Null
     }
 
     if (-not (Test-Path -LiteralPath $LogFile)) {
-        New-Item -ItemType File -Path $LogFile -Force | Out-Null
+        New-Item `
+            -ItemType File `
+            -Path $LogFile `
+            -Force |
+            Out-Null
     }
 }
 
@@ -86,7 +92,10 @@ function Write-Log {
         }
     }
 
-    Add-Content -LiteralPath $LogFile -Value $logMessage -Encoding UTF8
+    Add-Content `
+        -LiteralPath $LogFile `
+        -Value $logMessage `
+        -Encoding UTF8
 }
 
 function Show-Separator {
@@ -100,7 +109,7 @@ function Convert-BytesToGB {
     )
 
     if ($null -eq $Bytes -or $Bytes -le 0) {
-        return 0
+        return [double]0
     }
 
     return [math]::Round($Bytes / 1GB, 2)
@@ -155,21 +164,25 @@ function Add-BackupToMetadata {
         }
 
         if (Test-Path -LiteralPath $BackupMetadataFile) {
-            $record | Export-Csv `
-                -LiteralPath $BackupMetadataFile `
-                -NoTypeInformation `
-                -Append `
-                -Encoding UTF8
+            $record |
+                Export-Csv `
+                    -LiteralPath $BackupMetadataFile `
+                    -NoTypeInformation `
+                    -Append `
+                    -Encoding UTF8
         }
         else {
-            $record | Export-Csv `
-                -LiteralPath $BackupMetadataFile `
-                -NoTypeInformation `
-                -Encoding UTF8
+            $record |
+                Export-Csv `
+                    -LiteralPath $BackupMetadataFile `
+                    -NoTypeInformation `
+                    -Encoding UTF8
         }
     }
     catch {
-        Write-Log "Could not update metadata file: $($_.Exception.Message)" 'WARNING'
+        Write-Log `
+            "Could not update metadata file: $($_.Exception.Message)" `
+            'WARNING'
     }
 }
 
@@ -197,34 +210,54 @@ function Test-BackupDestination {
 
     try {
         if (-not (Test-Path -LiteralPath $backupDest)) {
-            New-Item -ItemType Directory -Path $backupDest -Force | Out-Null
-            Write-Log "Created backup destination: $backupDest" 'SUCCESS'
+            New-Item `
+                -ItemType Directory `
+                -Path $backupDest `
+                -Force |
+                Out-Null
+
+            Write-Log `
+                "Created backup destination: $backupDest" `
+                'SUCCESS'
         }
         else {
-            Write-Log "Backup destination exists: $backupDest" 'SUCCESS'
+            Write-Log `
+                "Backup destination exists: $backupDest" `
+                'SUCCESS'
         }
 
         $resolvedPath = (Resolve-Path -LiteralPath $backupDest).Path
+        $freeSpaceGB = [double]::PositiveInfinity
 
         $root = [System.IO.Path]::GetPathRoot($resolvedPath)
+
         if ($root -and $root -match '^[A-Za-z]:\\$') {
             $driveName = $root.Substring(0, 1)
-            $drive = Get-PSDrive -Name $driveName -ErrorAction SilentlyContinue
+            $drive = Get-PSDrive `
+                -Name $driveName `
+                -ErrorAction SilentlyContinue
 
             if ($null -ne $drive) {
                 $freeSpaceGB = Convert-BytesToGB -Bytes $drive.Free
-                Write-Log "Available space: $freeSpaceGB GB" 'INFO'
-
-                if ($freeSpaceGB -lt 50) {
-                    Write-Log 'Less than 50 GB is available on the destination drive.' 'WARNING'
-                }
+                Write-Log `
+                    "Available space: $freeSpaceGB GB" `
+                    'INFO'
             }
+        }
+
+        if ($freeSpaceGB -lt 50) {
+            Write-Log `
+                'Less than 50 GB is available on the destination drive.' `
+                'WARNING'
         }
 
         return $resolvedPath
     }
     catch {
-        Write-Log "Unable to use backup destination: $($_.Exception.Message)" 'ERROR'
+        Write-Log `
+            "Unable to use backup destination: $($_.Exception.Message)" `
+            'ERROR'
+
         return $null
     }
 }
@@ -243,17 +276,30 @@ function Backup-CriticalFiles {
     Show-Separator
 
     $backupDate = Get-Date -Format 'yyyy-MM-dd_HHmmss'
-    $fileBackupPath = Join-Path $BackupPath "FileBackup_$backupDate"
+    $fileBackupPath = Join-Path `
+        -Path $BackupPath `
+        -ChildPath "FileBackup_$backupDate"
+
     $totalSize = [int64]0
     $folderCount = 0
     $hadErrors = $false
 
     try {
-        New-Item -ItemType Directory -Path $fileBackupPath -Force | Out-Null
-        Write-Log "Created backup directory: $fileBackupPath" 'INFO'
+        New-Item `
+            -ItemType Directory `
+            -Path $fileBackupPath `
+            -Force |
+            Out-Null
+
+        Write-Log `
+            "Created backup directory: $fileBackupPath" `
+            'INFO'
     }
     catch {
-        Write-Log "Failed to create backup directory: $($_.Exception.Message)" 'ERROR'
+        Write-Log `
+            "Failed to create backup directory: $($_.Exception.Message)" `
+            'ERROR'
+
         return $false
     }
 
@@ -263,22 +309,29 @@ function Backup-CriticalFiles {
         }
 
         if (-not (Test-Path -LiteralPath $folder -PathType Container)) {
-            Write-Log "Folder not found, skipping: $folder" 'WARNING'
+            Write-Log `
+                "Folder not found, skipping: $folder" `
+                'WARNING'
+
             continue
         }
 
-        $sourceItem = Get-Item -LiteralPath $folder
-        $folderName = $sourceItem.Name
-
-        if ([string]::IsNullOrWhiteSpace($folderName)) {
-            $folderName = 'RootFolder'
-        }
-
-        $destinationFolder = Join-Path $fileBackupPath $folderName
-
-        Write-Log "Backing up: $folder" 'INFO'
-
         try {
+            $sourceItem = Get-Item -LiteralPath $folder
+            $folderName = $sourceItem.Name
+
+            if ([string]::IsNullOrWhiteSpace($folderName)) {
+                $folderName = 'RootFolder'
+            }
+
+            $destinationFolder = Join-Path `
+                -Path $fileBackupPath `
+                -ChildPath $folderName
+
+            Write-Log `
+                "Backing up: $folder" `
+                'INFO'
+
             $folderSize = Get-FolderSize -Path $folder
 
             New-Item `
@@ -287,47 +340,61 @@ function Backup-CriticalFiles {
                 -Force |
                 Out-Null
 
-            Copy-Item `
-                -LiteralPath (Join-Path $folder '*') `
-                -Destination $destinationFolder `
-                -Recurse `
-                -Force `
-                -ErrorAction Stop
+            # Copy the contents of the source folder.
+            Get-ChildItem `
+                -LiteralPath $folder `
+                -Force |
+                Copy-Item `
+                    -Destination $destinationFolder `
+                    -Recurse `
+                    -Force `
+                    -ErrorAction Stop
 
             $totalSize += $folderSize
             $folderCount++
 
             Write-Log `
-                "Backed up $folderName: $(Convert-BytesToGB $folderSize) GB" `
+                "Backed up ${folderName}: $(Convert-BytesToGB -Bytes $folderSize) GB" `
                 'SUCCESS'
         }
         catch {
             $hadErrors = $true
+
             Write-Log `
-                "Error backing up $folder: $($_.Exception.Message)" `
+                "Error backing up ${folder}: $($_.Exception.Message)" `
                 'ERROR'
         }
     }
 
-    $totalSizeGB = Convert-BytesToGB $totalSize
+    $totalSizeGB = Convert-BytesToGB -Bytes $totalSize
 
-    Write-Log "File backup completed: $totalSizeGB GB in $folderCount folders" 'INFO'
-    Write-Log "Backup location: $fileBackupPath" 'SUCCESS'
+    Write-Log `
+        "File backup completed: $totalSizeGB GB in $folderCount folders" `
+        'INFO'
+
+    Write-Log `
+        "Backup location: $fileBackupPath" `
+        'SUCCESS'
 
     if ($folderCount -gt 0) {
         $Script:TotalBackupSize += $totalSize
         $Script:BackupsCreated++
 
+        $backupStatus = if ($hadErrors) {
+            'CompletedWithErrors'
+        }
+        else {
+            'Success'
+        }
+
         Add-BackupToMetadata `
             -BackupPath $fileBackupPath `
             -BackupType 'FileBackup' `
             -SizeGB $totalSizeGB `
-            -Status $(if ($hadErrors) { 'CompletedWithErrors' } else { 'Success' })
-
-        return (-not $hadErrors)
+            -Status $backupStatus
     }
 
-    return $false
+    return (-not $hadErrors)
 }
 
 # ============================================================================
@@ -344,14 +411,21 @@ function Backup-Registry {
     Show-Separator
 
     $registryBackupPath = Join-Path `
-        $BackupPath `
-        "RegistryBackup_$(Get-Date -Format 'yyyy-MM-dd_HHmmss')"
+        -Path $BackupPath `
+        -ChildPath "RegistryBackup_$(Get-Date -Format 'yyyy-MM-dd_HHmmss')"
 
     try {
-        New-Item -ItemType Directory -Path $registryBackupPath -Force | Out-Null
+        New-Item `
+            -ItemType Directory `
+            -Path $registryBackupPath `
+            -Force |
+            Out-Null
     }
     catch {
-        Write-Log "Failed to create registry backup directory: $($_.Exception.Message)" 'ERROR'
+        Write-Log `
+            "Failed to create registry backup directory: $($_.Exception.Message)" `
+            'ERROR'
+
         return $false
     }
 
@@ -364,16 +438,24 @@ function Backup-Registry {
 
     $backupSize = [int64]0
     $exportedCount = 0
+    $hadErrors = $false
 
     foreach ($entry in $registryHives.GetEnumerator()) {
         $backupFile = Join-Path `
-            $registryBackupPath `
-            "$($entry.Key).reg"
+            -Path $registryBackupPath `
+            -ChildPath "$($entry.Key).reg"
 
-        Write-Log "Exporting $($entry.Value)" 'INFO'
+        Write-Log `
+            "Exporting $($entry.Value)" `
+            'INFO'
 
         try {
-            $regOutput = & reg.exe export $entry.Value $backupFile /y 2>&1
+            $regOutput = & reg.exe export `
+                $entry.Value `
+                $backupFile `
+                /y `
+                2>&1
+
             $exitCode = $LASTEXITCODE
 
             if ($regOutput) {
@@ -383,42 +465,64 @@ function Backup-Registry {
                     -Encoding UTF8
             }
 
-            if ($exitCode -eq 0 -and (Test-Path -LiteralPath $backupFile)) {
+            if (
+                $exitCode -eq 0 -and
+                (Test-Path -LiteralPath $backupFile)
+            ) {
                 $fileSize = (Get-Item -LiteralPath $backupFile).Length
                 $backupSize += $fileSize
                 $exportedCount++
 
-                Write-Log "Exported $($entry.Value)" 'SUCCESS'
+                Write-Log `
+                    "Exported $($entry.Value)" `
+                    'SUCCESS'
             }
             else {
-                Write-Log "Failed to export $($entry.Value)" 'ERROR'
+                $hadErrors = $true
+
+                Write-Log `
+                    "Failed to export $($entry.Value)" `
+                    'ERROR'
             }
         }
         catch {
+            $hadErrors = $true
+
             Write-Log `
                 "Error exporting $($entry.Value): $($_.Exception.Message)" `
                 'ERROR'
         }
     }
 
-    $backupSizeGB = Convert-BytesToGB $backupSize
+    $backupSizeGB = Convert-BytesToGB -Bytes $backupSize
 
-    Write-Log "Registry backup size: $backupSizeGB GB" 'INFO'
-    Write-Log "Registry backup location: $registryBackupPath" 'SUCCESS'
+    Write-Log `
+        "Registry backup size: $backupSizeGB GB" `
+        'INFO'
+
+    Write-Log `
+        "Registry backup location: $registryBackupPath" `
+        'SUCCESS'
 
     if ($exportedCount -gt 0) {
         $Script:TotalBackupSize += $backupSize
         $Script:BackupsCreated++
 
+        $backupStatus = if ($hadErrors) {
+            'CompletedWithErrors'
+        }
+        else {
+            'Success'
+        }
+
         Add-BackupToMetadata `
             -BackupPath $registryBackupPath `
             -BackupType 'RegistryBackup' `
-            -SizeGB $backupSizeGB
-
-        return $true
+            -SizeGB $backupSizeGB `
+            -Status $backupStatus
     }
 
-    return $false
+    return ($exportedCount -gt 0 -and -not $hadErrors)
 }
 
 # ============================================================================
@@ -435,41 +539,57 @@ function Create-SystemImage {
     Show-Separator
 
     if (-not (Get-Command wbadmin.exe -ErrorAction SilentlyContinue)) {
-        Write-Log 'wbadmin.exe was not found on this system.' 'ERROR'
+        Write-Log `
+            'wbadmin.exe was not found on this system.' `
+            'ERROR'
+
         return $false
     }
-
-    $resolvedBackupPath = (Resolve-Path -LiteralPath $BackupPath).Path
-    $backupRoot = [System.IO.Path]::GetPathRoot($resolvedBackupPath)
-
-    if ($backupRoot -notmatch '^[A-Za-z]:\\$') {
-        Write-Log 'System-image backup requires a local drive-letter destination.' 'ERROR'
-        return $false
-    }
-
-    $backupDrive = $backupRoot.Substring(0, 1).ToUpperInvariant()
-
-    # wbadmin -backupTarget must be a volume root such as E:.
-    # A normal subdirectory such as E:\SystemBackups is not valid.
-    if ($backupDrive -eq $env:SystemDrive.Substring(0, 1).ToUpperInvariant()) {
-        Write-Log 'Do not store the system image on the Windows system drive.' 'ERROR'
-        return $false
-    }
-
-    Write-Log "System-image target volume: $backupDrive`:" 'INFO'
-    Write-Log 'wbadmin will manage the WindowsImageBackup folder on that volume.' 'WARNING'
-    Write-Log 'This operation may take a considerable amount of time.' 'WARNING'
-
-    $arguments = @(
-        'start',
-        'backup',
-        "-backupTarget:$backupDrive`:",
-        '-include:C:',
-        '-allCritical',
-        '-quiet'
-    )
 
     try {
+        $resolvedBackupPath = (Resolve-Path -LiteralPath $BackupPath).Path
+        $backupRoot = [System.IO.Path]::GetPathRoot($resolvedBackupPath)
+
+        if ($backupRoot -notmatch '^[A-Za-z]:\\$') {
+            Write-Log `
+                'System-image backup requires a local drive-letter destination.' `
+                'ERROR'
+
+            return $false
+        }
+
+        $backupDrive = $backupRoot.Substring(0, 1).ToUpperInvariant()
+        $systemDrive = $env:SystemDrive.Substring(0, 1).ToUpperInvariant()
+
+        if ($backupDrive -eq $systemDrive) {
+            Write-Log `
+                'Do not store the system image on the Windows system drive.' `
+                'ERROR'
+
+            return $false
+        }
+
+        Write-Log `
+            "System-image target volume: ${backupDrive}:" `
+            'INFO'
+
+        Write-Log `
+            'wbadmin will manage the WindowsImageBackup folder on that volume.' `
+            'WARNING'
+
+        Write-Log `
+            'This operation may take a considerable amount of time.' `
+            'WARNING'
+
+        $arguments = @(
+            'start',
+            'backup',
+            "-backupTarget:${backupDrive}:",
+            '-include:C:',
+            '-allCritical',
+            '-quiet'
+        )
+
         $output = & wbadmin.exe @arguments 2>&1
         $exitCode = $LASTEXITCODE
 
@@ -481,17 +601,21 @@ function Create-SystemImage {
         }
 
         if ($exitCode -eq 0) {
-            Write-Log 'System-image backup completed successfully.' 'SUCCESS'
+            Write-Log `
+                'System-image backup completed successfully.' `
+                'SUCCESS'
 
-            $imagePath = Join-Path `
-                "$backupDrive`:\" `
-                'WindowsImageBackup'
-
+            $imagePath = "${backupDrive}:\WindowsImageBackup"
             $backupSize = Get-FolderSize -Path $imagePath
-            $backupSizeGB = Convert-BytesToGB $backupSize
+            $backupSizeGB = Convert-BytesToGB -Bytes $backupSize
 
-            Write-Log "Estimated system-image size: $backupSizeGB GB" 'INFO'
-            Write-Log "System-image location: $imagePath" 'SUCCESS'
+            Write-Log `
+                "Estimated system-image size: $backupSizeGB GB" `
+                'INFO'
+
+            Write-Log `
+                "System-image location: $imagePath" `
+                'SUCCESS'
 
             $Script:TotalBackupSize += $backupSize
             $Script:BackupsCreated++
@@ -499,18 +623,23 @@ function Create-SystemImage {
             Add-BackupToMetadata `
                 -BackupPath $imagePath `
                 -BackupType 'SystemImage' `
-                -SizeGB $backupSizeGB
+                -SizeGB $backupSizeGB `
+                -Status 'Success'
 
             return $true
         }
 
-        Write-Log "System-image backup failed with exit code $exitCode." 'ERROR'
+        Write-Log `
+            "System-image backup failed with exit code $exitCode." `
+            'ERROR'
+
         return $false
     }
     catch {
         Write-Log `
             "Error creating system image: $($_.Exception.Message)" `
             'ERROR'
+
         return $false
     }
 }
@@ -529,39 +658,57 @@ function List-AvailableBackups {
     Show-Separator
 
     if (-not (Test-Path -LiteralPath $BackupPath -PathType Container)) {
-        Write-Log "Backup path not found: $BackupPath" 'WARNING'
+        Write-Log `
+            "Backup path not found: $BackupPath" `
+            'WARNING'
+
         return
     }
 
     try {
         $backupDirs = @(Get-ChildItem `
-            -LiteralPath $BackupPath `
-            -Directory `
-            -Force `
-            -ErrorAction Stop)
+                -LiteralPath $BackupPath `
+                -Directory `
+                -Force `
+                -ErrorAction Stop)
 
         if ($backupDirs.Count -eq 0) {
             Write-Log 'No backups found.' 'INFO'
             return
         }
 
-        Write-Log "Found $($backupDirs.Count) backup(s):" 'INFO'
-        Write-Log '' 'INFO'
+        Write-Log `
+            "Found $($backupDirs.Count) backup(s):" `
+            'INFO'
 
         foreach ($backup in $backupDirs) {
             $size = Get-FolderSize -Path $backup.FullName
-            $sizeGB = Convert-BytesToGB $size
+            $sizeGB = Convert-BytesToGB -Bytes $size
             $age = (Get-Date) - $backup.CreationTime
 
-            Write-Log "Backup: $($backup.Name)" 'INFO'
-            Write-Log "  Created: $($backup.CreationTime)" 'INFO'
-            Write-Log "  Age: $($age.Days) days, $($age.Hours) hours" 'INFO'
-            Write-Log "  Size: $sizeGB GB" 'INFO'
+            Write-Log `
+                "Backup: $($backup.Name)" `
+                'INFO'
+
+            Write-Log `
+                " Created: $($backup.CreationTime)" `
+                'INFO'
+
+            Write-Log `
+                " Age: $($age.Days) days, $($age.Hours) hours" `
+                'INFO'
+
+            Write-Log `
+                " Size: $sizeGB GB" `
+                'INFO'
+
             Write-Log '' 'INFO'
         }
     }
     catch {
-        Write-Log "Error listing backups: $($_.Exception.Message)" 'ERROR'
+        Write-Log `
+            "Error listing backups: $($_.Exception.Message)" `
+            'ERROR'
     }
 }
 
@@ -582,7 +729,10 @@ function Remove-OldBackups {
     Show-Separator
 
     if (-not (Test-Path -LiteralPath $BackupPath -PathType Container)) {
-        Write-Log "Backup path not found: $BackupPath" 'WARNING'
+        Write-Log `
+            "Backup path not found: $BackupPath" `
+            'WARNING'
+
         return
     }
 
@@ -590,16 +740,19 @@ function Remove-OldBackups {
         $cutoffDate = (Get-Date).AddDays(-$RetentionDays)
 
         $oldBackups = @(Get-ChildItem `
-            -LiteralPath $BackupPath `
-            -Directory `
-            -Force `
-            -ErrorAction Stop |
-            Where-Object { $_.CreationTime -lt $cutoffDate })
+                -LiteralPath $BackupPath `
+                -Directory `
+                -Force `
+                -ErrorAction Stop |
+                Where-Object {
+                    $_.CreationTime -lt $cutoffDate
+                })
 
         if ($oldBackups.Count -eq 0) {
             Write-Log `
                 "No backups older than $RetentionDays days were found." `
                 'SUCCESS'
+
             return
         }
 
@@ -611,7 +764,10 @@ function Remove-OldBackups {
 
         foreach ($backup in $oldBackups) {
             $size = Get-FolderSize -Path $backup.FullName
-            Write-Log "Removing: $($backup.Name)" 'INFO'
+
+            Write-Log `
+                "Removing: $($backup.Name)" `
+                'INFO'
 
             try {
                 Remove-Item `
@@ -621,7 +777,10 @@ function Remove-OldBackups {
                     -ErrorAction Stop
 
                 $removedSize += $size
-                Write-Log "Deleted: $($backup.FullName)" 'SUCCESS'
+
+                Write-Log `
+                    "Deleted: $($backup.FullName)" `
+                    'SUCCESS'
             }
             catch {
                 Write-Log `
@@ -630,8 +789,10 @@ function Remove-OldBackups {
             }
         }
 
+        $removedSizeGB = Convert-BytesToGB -Bytes $removedSize
+
         Write-Log `
-            "Cleanup completed. Removed approximately $(Convert-BytesToGB $removedSize) GB." `
+            "Cleanup completed. Removed approximately $removedSizeGB GB." `
             'SUCCESS'
     }
     catch {
@@ -663,17 +824,35 @@ function Show-BackupReport {
         'SUCCESS'
     }
 
-    Write-Log "Backups created: $($Script:BackupsCreated)" 'SUCCESS'
-    Write-Log "Backup failures: $($Script:BackupsFailed)" $failureLevel
     Write-Log `
-        "Total backup size: $(Convert-BytesToGB $Script:TotalBackupSize) GB" `
-        'INFO'
-    Write-Log "Backup location: $BackupPath" 'INFO'
-    Write-Log "Retention policy: $BackupRetentionDays days" 'INFO'
-    Write-Log "Log file: $LogFile" 'INFO'
-    Write-Log "Metadata file: $BackupMetadataFile" 'INFO'
+        "Backups created: $($Script:BackupsCreated)" `
+        'SUCCESS'
 
-    Show-Separator
+    Write-Log `
+        "Backup failures: $($Script:BackupsFailed)" `
+        $failureLevel
+
+    $totalSizeGB = Convert-BytesToGB -Bytes $Script:TotalBackupSize
+
+    Write-Log `
+        "Total backup size: $totalSizeGB GB" `
+        'INFO'
+
+    Write-Log `
+        "Backup location: $BackupPath" `
+        'INFO'
+
+    Write-Log `
+        "Retention policy: $BackupRetentionDays days" `
+        'INFO'
+
+    Write-Log `
+        "Log file: $LogFile" `
+        'INFO'
+
+    Write-Log `
+        "Metadata file: $BackupMetadataFile" `
+        'INFO'
 }
 
 # ============================================================================
@@ -685,14 +864,24 @@ function Main {
 
     Write-Log ('=' * 72) 'INFO'
     Write-Log 'BACKUP AND RECOVERY SCRIPT' 'INFO'
-    Write-Log "Started: $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')" 'INFO'
-    Write-Log "Log file: $LogFile" 'INFO'
+
+    Write-Log `
+        "Started: $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')" `
+        'INFO'
+
+    Write-Log `
+        "Log file: $LogFile" `
+        'INFO'
+
     Show-Separator
 
     $backupDestination = Test-BackupDestination
 
     if ([string]::IsNullOrWhiteSpace($backupDestination)) {
-        Write-Log 'Backup cancelled because no destination was specified.' 'ERROR'
+        Write-Log `
+            'Backup cancelled because no destination was specified.' `
+            'ERROR'
+
         return
     }
 
@@ -724,7 +913,9 @@ function Main {
         }
     }
     else {
-        Write-Log 'System-image backup skipped by user.' 'INFO'
+        Write-Log `
+            'System-image backup skipped by user.' `
+            'INFO'
     }
 
     Show-Separator
@@ -742,11 +933,20 @@ function Main {
         -RetentionDays $BackupRetentionDays
 
     Show-BackupReport -BackupPath $backupDestination
-
-    Write-Log "Completed: $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')" 'INFO'
-    Write-Log "Log saved to: $LogFile" 'INFO'
-    Write-Log "Metadata saved to: $BackupMetadataFile" 'INFO'
-    Write-Log ('=' * 72) 'INFO'
 }
 
 Main
+
+Write-Log `
+    "Completed: $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')" `
+    'INFO'
+
+Write-Log `
+    "Log saved to: $LogFile" `
+    'INFO'
+
+Write-Log `
+    "Metadata saved to: $BackupMetadataFile" `
+    'INFO'
+
+Write-Log ('=' * 72) 'INFO'
