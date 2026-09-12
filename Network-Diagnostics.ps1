@@ -1,612 +1,902 @@
 <#
 .SYNOPSIS
     Network Diagnostics Script
-    Performs comprehensive network connectivity and performance assessment
 
 .DESCRIPTION
-    This script performs thorough network diagnostics including:
-    - Internet connectivity testing
-    - DNS resolution and validation
-    - Network speed testing
-    - Network adapter health check
-    - IP configuration audit
-    - Gateway and routing analysis
-    - Duplicate IP detection
-    - Network driver health
-    - Ping and latency testing
-    - DNS server performance
-    - Generates diagnostic report
-    All results are logged to the user's Documents folder
+    Performs network connectivity, DNS, adapter, IP configuration,
+    gateway, ARP, driver, latency, and download-speed tests.
 
 .NOTES
-    Requires Administrator privileges
-    Log file: $env:USERPROFILE\Documents\NetworkDiagnostics_YYYYMMDD_HHmmss.log
-
-.AUTHOR
-    Network Diagnostics Script
+    Recommended: Run PowerShell as Administrator.
+    Log location: C:\temp\NetworkDiagnostics_YYYYMMDD_HHmmss.log
 #>
 
-# Requires Administrator privileges
-#Requires -RunAsAdministrator
+#Requires -Version 5.1
 
-# ========== CONFIGURATION ==========
-$LogPath = Join-Path -Path $env:USERPROFILE -ChildPath "Documents"
+# =========================
+# CONFIGURATION
+# =========================
+
+$LogPath = "C:\temp"
 $LogFileName = "NetworkDiagnostics_$(Get-Date -Format 'yyyyMMdd_HHmmss').log"
 $LogFile = Join-Path -Path $LogPath -ChildPath $LogFileName
+
 $Script:IssuesFound = 0
 $Script:WarningsFound = 0
 $Script:ChecksPassed = 0
 
-# Test targets
-$InternetTestHost = "8.8.8.8"  # Google DNS
-$InternetTestDomain = "google.com"
-$DNSServers = @("8.8.8.8", "1.1.1.1", "208.67.222.222")  # Google, Cloudflare, OpenDNS
+$InternetTestHost = "8.8.8.8"
 
-# ========== FUNCTIONS ==========
+$DNSServers = @(
+    "8.8.8.8",       # Google DNS
+    "1.1.1.1",       # Cloudflare DNS
+    "208.67.222.222" # OpenDNS
+)
+
+# =========================
+# LOGGING
+# =========================
 
 function Write-Log {
-    <#
-    .SYNOPSIS
-        Write messages to both console and log file
-    #>
-    param(
-        [Parameter(Mandatory=$true)]
+    param (
+        [Parameter(Mandatory = $true)]
+        [AllowEmptyString()]
         [string]$Message,
-        
+
         [ValidateSet("INFO", "WARNING", "ERROR", "SUCCESS")]
         [string]$Level = "INFO"
     )
-    
-    $timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
-    $logMessage = "[$timestamp] [$Level] $Message"
-    
-    # Write to console with color coding
+
+    $Timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
+    $LogMessage = "[$Timestamp] [$Level] $Message"
+
     switch ($Level) {
-        "INFO"    { Write-Host $logMessage -ForegroundColor White }
-        "WARNING" { Write-Host $logMessage -ForegroundColor Yellow }
-        "ERROR"   { Write-Host $logMessage -ForegroundColor Red }
-        "SUCCESS" { Write-Host $logMessage -ForegroundColor Green }
+        "INFO" {
+            Write-Host $LogMessage -ForegroundColor White
+        }
+        "WARNING" {
+            Write-Host $LogMessage -ForegroundColor Yellow
+        }
+        "ERROR" {
+            Write-Host $LogMessage -ForegroundColor Red
+        }
+        "SUCCESS" {
+            Write-Host $LogMessage -ForegroundColor Green
+        }
     }
-    
-    # Write to log file
-    Add-Content -Path $LogFile -Value $logMessage
+
+    try {
+        Add-Content -Path $LogFile -Value $LogMessage -ErrorAction Stop
+    }
+    catch {
+        Write-Host "Unable to write to log file: $($_.Exception.Message)" `
+            -ForegroundColor Red
+    }
 }
 
 function Show-Separator {
-    <#
-    .SYNOPSIS
-        Display a visual separator
-    #>
     Write-Log "================================================================" "INFO"
 }
 
+# =========================
+# INTERNET CONNECTIVITY
+# =========================
+
 function Test-InternetConnectivity {
-    <#
-    .SYNOPSIS
-        Test basic internet connectivity
-    #>
     Write-Log "INTERNET CONNECTIVITY TEST" "INFO"
     Show-Separator
-    
-    Write-Log "Testing connectivity to: $InternetTestHost" "INFO"
-    
+
+    Write-Log "Testing connectivity to $InternetTestHost" "INFO"
+
     try {
-        $ping = Test-Connection -ComputerName $InternetTestHost -Count 4 -ErrorAction SilentlyContinue
-        
-        if ($null -ne $ping) {
-            Write-Log "✓ Internet connectivity: SUCCESS" "SUCCESS"
-            Write-Log "Response Status: $($ping[0].Status)" "SUCCESS"
-            
-            # Calculate latency statistics
-            $latencies = $ping.ResponseTime
-            $avgLatency = [math]::Round(($latencies | Measure-Object -Average).Average, 2)
-            $minLatency = ($latencies | Measure-Object -Minimum).Minimum
-            $maxLatency = ($latencies | Measure-Object -Maximum).Maximum
-            
-            Write-Log "Ping Statistics:" "INFO"
-            Write-Log "  Average Latency: $avgLatency ms" "INFO"
-            Write-Log "  Min Latency: $minLatency ms" "INFO"
-            Write-Log "  Max Latency: $maxLatency ms" "INFO"
-            Write-Log "  Packet Loss: 0%" "SUCCESS"
-            
+        $PingResults = Test-Connection `
+            -ComputerName $InternetTestHost `
+            -Count 4 `
+            -ErrorAction SilentlyContinue
+
+        if ($null -ne $PingResults -and $PingResults.Count -gt 0) {
+            Write-Log "Internet connectivity: SUCCESS" "SUCCESS"
+
+            $ResponseTimes = @(
+                $PingResults |
+                    Where-Object { $_.ResponseTime -ne $null } |
+                    Select-Object -ExpandProperty ResponseTime
+            )
+
+            if ($ResponseTimes.Count -gt 0) {
+                $AverageLatency = [math]::Round(
+                    ($ResponseTimes | Measure-Object -Average).Average,
+                    2
+                )
+
+                $MinimumLatency = (
+                    $ResponseTimes | Measure-Object -Minimum
+                ).Minimum
+
+                $MaximumLatency = (
+                    $ResponseTimes | Measure-Object -Maximum
+                ).Maximum
+
+                $SuccessfulPings = $ResponseTimes.Count
+                $PacketLoss = [math]::Round(
+                    (1 - ($SuccessfulPings / 4)) * 100,
+                    0
+                )
+
+                Write-Log "Average latency: $AverageLatency ms" "INFO"
+                Write-Log "Minimum latency: $MinimumLatency ms" "INFO"
+                Write-Log "Maximum latency: $MaximumLatency ms" "INFO"
+                Write-Log "Packet loss: $PacketLoss%" "INFO"
+
+                if ($PacketLoss -eq 0) {
+                    Write-Log "No packet loss detected" "SUCCESS"
+                }
+                else {
+                    Write-Log "Packet loss detected" "WARNING"
+                    $Script:WarningsFound++
+                }
+            }
+
             $Script:ChecksPassed++
-        } else {
-            Write-Log "✗ No internet connectivity detected" "ERROR"
+        }
+        else {
+            Write-Log "No internet connectivity detected" "ERROR"
             $Script:IssuesFound++
         }
     }
     catch {
-        Write-Log "✗ Connectivity test failed: $_" "ERROR"
+        Write-Log "Connectivity test failed: $($_.Exception.Message)" "ERROR"
         $Script:IssuesFound++
     }
-    
+
     Write-Log "" "INFO"
 }
 
+# =========================
+# DNS DOMAIN RESOLUTION
+# =========================
+
 function Test-DomainResolution {
-    <#
-    .SYNOPSIS
-        Test DNS domain resolution
-    #>
     Write-Log "DNS DOMAIN RESOLUTION TEST" "INFO"
     Show-Separator
-    
-    $testDomains = @("google.com", "microsoft.com", "github.com")
-    $resolvedCount = 0
-    
-    foreach ($domain in $testDomains) {
-        Write-Log "Resolving: $domain" "INFO"
-        
+
+    $TestDomains = @(
+        "google.com",
+        "microsoft.com",
+        "github.com"
+    )
+
+    $ResolvedCount = 0
+
+    foreach ($Domain in $TestDomains) {
+        Write-Log "Resolving: $Domain" "INFO"
+
         try {
-            $result = Resolve-DnsName -Name $domain -ErrorAction SilentlyContinue
-            
-            if ($null -ne $result) {
-                $ipAddress = $result[0].IPAddress
-                Write-Log "  ✓ Resolved to: $ipAddress" "SUCCESS"
-                $resolvedCount++
-            } else {
-                Write-Log "  ✗ Resolution failed" "ERROR"
+            $Results = Resolve-DnsName `
+                -Name $Domain `
+                -Type A `
+                -ErrorAction Stop
+
+            $IPv4Addresses = @(
+                $Results |
+                    Where-Object { $_.Type -eq "A" } |
+                    Select-Object -ExpandProperty IPAddress
+            )
+
+            if ($IPv4Addresses.Count -gt 0) {
+                Write-Log `
+                    "Resolved to: $($IPv4Addresses -join ', ')" `
+                    "SUCCESS"
+
+                $ResolvedCount++
+            }
+            else {
+                Write-Log "No IPv4 address returned" "ERROR"
                 $Script:IssuesFound++
             }
         }
         catch {
-            Write-Log "  ✗ Error resolving: $_" "ERROR"
+            Write-Log `
+                "Error resolving $Domain`: $($_.Exception.Message)" `
+                "ERROR"
+
             $Script:IssuesFound++
         }
     }
-    
-    Write-Log "" "INFO"
-    
-    if ($resolvedCount -eq $testDomains.Count) {
-        Write-Log "✓ All domains resolved successfully" "SUCCESS"
+
+    if ($ResolvedCount -eq $TestDomains.Count) {
+        Write-Log "All domains resolved successfully" "SUCCESS"
         $Script:ChecksPassed++
-    } else {
-        Write-Log "⚠ Some domains failed to resolve" "WARNING"
+    }
+    else {
+        Write-Log `
+            "$($TestDomains.Count - $ResolvedCount) domain(s) failed to resolve" `
+            "WARNING"
+
         $Script:WarningsFound++
     }
-    
+
     Write-Log "" "INFO"
 }
 
+# =========================
+# DNS SERVER PERFORMANCE
+# =========================
+
 function Test-DNSServerPerformance {
-    <#
-    .SYNOPSIS
-        Test DNS server response times
-    #>
     Write-Log "DNS SERVER PERFORMANCE TEST" "INFO"
     Show-Separator
-    
-    $dnsNames = @("8.8.8.8", "1.1.1.1", "208.67.222.222")
-    $dnsLabels = @("Google DNS", "Cloudflare DNS", "OpenDNS")
-    
-    for ($i = 0; $i -lt $dnsNames.Count; $i++) {
-        Write-Log "Testing: $($dnsLabels[$i]) ($($dnsNames[$i]))" "INFO"
-        
+
+    $DnsTests = @(
+        @{ Name = "Google DNS";     Address = "8.8.8.8" },
+        @{ Name = "Cloudflare DNS"; Address = "1.1.1.1" },
+        @{ Name = "OpenDNS";        Address = "208.67.222.222" }
+    )
+
+    foreach ($DnsTest in $DnsTests) {
+        Write-Log `
+            "Testing $($DnsTest.Name) ($($DnsTest.Address))" `
+            "INFO"
+
         try {
-            $start = Get-Date
-            $result = Resolve-DnsName -Name "google.com" -Server $dnsNames[$i] -ErrorAction SilentlyContinue
-            $end = Get-Date
-            
-            $responseTime = ($end - $start).TotalMilliseconds
-            
-            if ($null -ne $result) {
-                Write-Log "  ✓ Response time: $responseTime ms" "SUCCESS"
+            $Stopwatch = [System.Diagnostics.Stopwatch]::StartNew()
+
+            $Result = Resolve-DnsName `
+                -Name "google.com" `
+                -Server $DnsTest.Address `
+                -Type A `
+                -ErrorAction Stop
+
+            $Stopwatch.Stop()
+
+            $ResponseTime = [math]::Round(
+                $Stopwatch.Elapsed.TotalMilliseconds,
+                2
+            )
+
+            if ($null -ne $Result) {
+                Write-Log "Response time: $ResponseTime ms" "SUCCESS"
                 $Script:ChecksPassed++
-            } else {
-                Write-Log "  ✗ No response from DNS server" "ERROR"
+            }
+            else {
+                Write-Log "No response from DNS server" "WARNING"
                 $Script:WarningsFound++
             }
         }
         catch {
-            Write-Log "  ✗ Error testing DNS server: $_" "ERROR"
+            Write-Log `
+                "DNS test failed: $($_.Exception.Message)" `
+                "WARNING"
+
             $Script:WarningsFound++
         }
     }
-    
+
     Write-Log "" "INFO"
 }
 
+# =========================
+# NETWORK ADAPTERS
+# =========================
+
 function Get-NetworkAdapters {
-    <#
-    .SYNOPSIS
-        Get network adapter information and health
-    #>
     Write-Log "NETWORK ADAPTER INFORMATION" "INFO"
     Show-Separator
-    
+
     try {
-        $adapters = Get-NetAdapter -ErrorAction SilentlyContinue
-        
-        if ($null -eq $adapters) {
+        $Adapters = @(Get-NetAdapter -ErrorAction Stop)
+
+        if ($Adapters.Count -eq 0) {
             Write-Log "No network adapters found" "ERROR"
             $Script:IssuesFound++
             return
         }
-        
-        Write-Log "Found $($adapters.Count) network adapter(s):" "INFO"
+
+        Write-Log "Found $($Adapters.Count) network adapter(s)" "INFO"
         Write-Log "" "INFO"
-        
-        foreach ($adapter in $adapters) {
-            Write-Log "Adapter: $($adapter.Name)" "INFO"
-            Write-Log "  Description: $($adapter.InterfaceDescription)" "INFO"
-            Write-Log "  Status: $($adapter.Status)" $(if ($adapter.Status -eq "Up") { "SUCCESS" } else { "WARNING" })
-            Write-Log "  Type: $($adapter.MediaType)" "INFO"
-            Write-Log "  Speed: $($adapter.LinkSpeed)" "INFO"
-            
-            if ($adapter.Status -eq "Up") {
+
+        foreach ($Adapter in $Adapters) {
+            Write-Log "Adapter: $($Adapter.Name)" "INFO"
+            Write-Log `
+                "Description: $($Adapter.InterfaceDescription)" `
+                "INFO"
+
+            if ($Adapter.Status -eq "Up") {
+                Write-Log "Status: $($Adapter.Status)" "SUCCESS"
                 $Script:ChecksPassed++
-            } else {
+            }
+            else {
+                Write-Log "Status: $($Adapter.Status)" "WARNING"
                 $Script:WarningsFound++
             }
-            
+
+            Write-Log "Media type: $($Adapter.MediaType)" "INFO"
+            Write-Log "Link speed: $($Adapter.LinkSpeed)" "INFO"
             Write-Log "" "INFO"
         }
     }
     catch {
-        Write-Log "Error retrieving network adapters: $_" "ERROR"
+        Write-Log `
+            "Error retrieving network adapters: $($_.Exception.Message)" `
+            "ERROR"
+
         $Script:IssuesFound++
     }
-    
-    Write-Log "" "INFO"
 }
 
+# =========================
+# IP CONFIGURATION
+# =========================
+
 function Get-IPConfiguration {
-    <#
-    .SYNOPSIS
-        Display IP configuration details
-    #>
     Write-Log "IP CONFIGURATION AUDIT" "INFO"
     Show-Separator
-    
+
     try {
-        $interfaces = Get-NetIPConfiguration -ErrorAction SilentlyContinue
-        
-        if ($null -eq $interfaces) {
-            Write-Log "No IP configuration found" "ERROR"
+        $Interfaces = @(
+            Get-NetIPConfiguration -ErrorAction Stop |
+                Where-Object { $null -ne $_.IPv4Address }
+        )
+
+        if ($Interfaces.Count -eq 0) {
+            Write-Log "No IPv4 configuration found" "ERROR"
             $Script:IssuesFound++
             return
         }
-        
-        foreach ($interface in $interfaces) {
-            if ($null -eq $interface.IPv4Address) {
-                continue
+
+        foreach ($Interface in $Interfaces) {
+            $IPv4Address = $Interface.IPv4Address.IPAddress
+            $PrefixLength = $Interface.IPv4Address.PrefixLength
+            $Gateway = $Interface.IPv4DefaultGateway.NextHop
+
+            Write-Log `
+                "Interface: $($Interface.InterfaceAlias)" `
+                "INFO"
+
+            Write-Log "IPv4 address: $IPv4Address" "INFO"
+            Write-Log "Prefix length: $PrefixLength" "INFO"
+
+            if ([string]::IsNullOrWhiteSpace($Gateway)) {
+                Write-Log "IPv4 gateway: Not configured" "WARNING"
+                $Script:WarningsFound++
             }
-            
-            Write-Log "Interface: $($interface.InterfaceAlias)" "INFO"
-            Write-Log "  IPv4 Address: $($interface.IPv4Address.IPAddress)" "INFO"
-            Write-Log "  Subnet Mask: $($interface.IPv4Address.PrefixLength)" "INFO"
-            Write-Log "  IPv4 Gateway: $($interface.IPv4DefaultGateway.NextHop)" "INFO"
-            
-            # DNS configuration
-            $dnsConfig = Get-DnsClientServerAddress -InterfaceIndex $interface.InterfaceIndex -AddressFamily IPv4 -ErrorAction SilentlyContinue
-            if ($null -ne $dnsConfig) {
-                Write-Log "  DNS Servers: $($dnsConfig.ServerAddresses -join ', ')" "INFO"
+            else {
+                Write-Log "IPv4 gateway: $Gateway" "INFO"
             }
-            
+
+            $DnsConfig = Get-DnsClientServerAddress `
+                -InterfaceIndex $Interface.InterfaceIndex `
+                -AddressFamily IPv4 `
+                -ErrorAction SilentlyContinue
+
+            if ($null -ne $DnsConfig -and
+                $DnsConfig.ServerAddresses.Count -gt 0) {
+
+                Write-Log `
+                    "DNS servers: $($DnsConfig.ServerAddresses -join ', ')" `
+                    "INFO"
+            }
+            else {
+                Write-Log "DNS servers: Not configured" "WARNING"
+                $Script:WarningsFound++
+            }
+
+            $Script:ChecksPassed++
             Write-Log "" "INFO"
+        }
+    }
+    catch {
+        Write-Log `
+            "Error retrieving IP configuration: $($_.Exception.Message)" `
+            "ERROR"
+
+        $Script:IssuesFound++
+    }
+}
+
+# =========================
+# GATEWAY TEST
+# =========================
+
+function Test-DefaultGateway {
+    Write-Log "DEFAULT GATEWAY TEST" "INFO"
+    Show-Separator
+
+    try {
+        $DefaultRoute = Get-NetRoute `
+            -DestinationPrefix "0.0.0.0/0" `
+            -AddressFamily IPv4 `
+            -ErrorAction Stop |
+            Sort-Object RouteMetric |
+            Select-Object -First 1
+
+        if ($null -eq $DefaultRoute) {
+            Write-Log "No default gateway found" "ERROR"
+            $Script:IssuesFound++
+            return
+        }
+
+        $Gateway = $DefaultRoute.NextHop
+        Write-Log "Default gateway: $Gateway" "INFO"
+
+        $PingResult = Test-Connection `
+            -ComputerName $Gateway `
+            -Count 4 `
+            -ErrorAction SilentlyContinue
+
+        if ($null -ne $PingResult -and $PingResult.Count -gt 0) {
+            Write-Log "Default gateway is reachable" "SUCCESS"
             $Script:ChecksPassed++
         }
+        else {
+            Write-Log "Default gateway is not reachable" "ERROR"
+            $Script:IssuesFound++
+        }
     }
     catch {
-        Write-Log "Error retrieving IP configuration: $_" "ERROR"
+        Write-Log `
+            "Gateway test failed: $($_.Exception.Message)" `
+            "ERROR"
+
         $Script:IssuesFound++
     }
-    
+
     Write-Log "" "INFO"
 }
+
+# =========================
+# ARP / DUPLICATE IP CHECK
+# =========================
 
 function Detect-DuplicateIPs {
-    <#
-    .SYNOPSIS
-        Scan for duplicate IP addresses on network
-    #>
     Write-Log "DUPLICATE IP ADDRESS DETECTION" "INFO"
     Show-Separator
-    
-    Write-Log "Scanning for duplicate IPs on local network..." "INFO"
-    Write-Log "⏳ This may take a minute..." "WARNING"
-    
+
     try {
-        # Get gateway
-        $gateway = (Get-NetRoute -DestinationPrefix "0.0.0.0/0" -ErrorAction SilentlyContinue | Select-Object -First 1).NextHop
-        
-        if ($null -eq $gateway) {
-            Write-Log "Could not determine gateway" "WARNING"
+        Write-Log "Refreshing the ARP cache..." "INFO"
+
+        $null = arp.exe -d "*" 2>$null
+
+        $DefaultRoute = Get-NetRoute `
+            -DestinationPrefix "0.0.0.0/0" `
+            -AddressFamily IPv4 `
+            -ErrorAction SilentlyContinue |
+            Sort-Object RouteMetric |
+            Select-Object -First 1
+
+        if ($null -eq $DefaultRoute) {
+            Write-Log "Could not determine the default gateway" "WARNING"
+            $Script:WarningsFound++
             return
         }
-        
-        # Parse gateway IP
-        $gatewayParts = $gateway.Split(".")
-        $network = "$($gatewayParts[0]).$($gatewayParts[1]).$($gatewayParts[2])."
-        
-        Write-Log "Gateway: $gateway" "INFO"
-        Write-Log "Network: $network" "INFO"
-        
-        $arpTable = arp -a 2>$null | Select-String "dynamic" | Measure-Object
-        $uniqueIPs = (arp -a 2>$null | Select-String "dynamic" | 
-                     ForEach-Object { $_.Line -split '\s+' } | 
-                     Where-Object { $_ -match '^\d+\.\d+\.\d+\.\d+$' } | 
-                     Select-Object -Unique).Count
-        
-        Write-Log "✓ ARP entries found: $($arpTable.Count)" "INFO"
-        Write-Log "✓ Unique IPs found: $uniqueIPs" "SUCCESS"
-        Write-Log "✓ No duplicate IP addresses detected" "SUCCESS"
-        
-        $Script:ChecksPassed++
+
+        $Gateway = $DefaultRoute.NextHop
+        Write-Log "Gateway: $Gateway" "INFO"
+
+        $null = Test-Connection `
+            -ComputerName $Gateway `
+            -Count 1 `
+            -ErrorAction SilentlyContinue
+
+        $ArpLines = @(
+            arp.exe -a 2>$null |
+                Select-String "dynamic"
+        )
+
+        if ($ArpLines.Count -eq 0) {
+            Write-Log "No dynamic ARP entries found" "WARNING"
+            $Script:WarningsFound++
+            return
+        }
+
+        $IpAddresses = @(
+            $ArpLines |
+                ForEach-Object {
+                    $Parts = $_.Line -split "\s+"
+
+                    foreach ($Part in $Parts) {
+                        if ($Part -match `
+                            "^\d{1,3}(\.\d{1,3}){3}$") {
+                            $Part
+                        }
+                    }
+                }
+        )
+
+        $DuplicateAddresses = @(
+            $IpAddresses |
+                Group-Object |
+                Where-Object { $_.Count -gt 1 }
+        )
+
+        Write-Log `
+            "Dynamic ARP entries found: $($ArpLines.Count)" `
+            "INFO"
+
+        if ($DuplicateAddresses.Count -eq 0) {
+            Write-Log "No duplicate IP addresses detected" "SUCCESS"
+            $Script:ChecksPassed++
+        }
+        else {
+            foreach ($Duplicate in $DuplicateAddresses) {
+                Write-Log `
+                    "Possible duplicate IP: $($Duplicate.Name)" `
+                    "WARNING"
+            }
+
+            $Script:WarningsFound++
+        }
     }
     catch {
-        Write-Log "Could not complete duplicate IP scan: $_" "WARNING"
+        Write-Log `
+            "Duplicate IP scan failed: $($_.Exception.Message)" `
+            "WARNING"
+
         $Script:WarningsFound++
     }
-    
+
     Write-Log "" "INFO"
 }
 
-function Check-NetworkDrivers {
-    <#
-    .SYNOPSIS
-        Check network adapter driver health
-    #>
+# =========================
+# DRIVER HEALTH
+# =========================
+
+function Test-NetworkDrivers {
     Write-Log "NETWORK DRIVER HEALTH CHECK" "INFO"
     Show-Separator
-    
+
     try {
-        $netAdapters = Get-CimInstance -ClassName Win32_NetworkAdapter -ErrorAction SilentlyContinue
-        
-        if ($null -eq $netAdapters) {
-            Write-Log "Could not retrieve network adapters" "WARNING"
+        $Adapters = @(
+            Get-CimInstance `
+                -ClassName Win32_NetworkAdapter `
+                -ErrorAction Stop |
+                Where-Object { $_.PhysicalAdapter -eq $true }
+        )
+
+        if ($Adapters.Count -eq 0) {
+            Write-Log "No physical network adapters found" "WARNING"
+            $Script:WarningsFound++
             return
         }
-        
-        Write-Log "Checking driver status for $($netAdapters.Count) adapter(s):" "INFO"
-        Write-Log "" "INFO"
-        
-        foreach ($adapter in $netAdapters) {
-            if ([string]::IsNullOrWhiteSpace($adapter.Manufacturer)) {
-                continue
-            }
-            
-            Write-Log "Adapter: $($adapter.Name)" "INFO"
-            Write-Log "  Manufacturer: $($adapter.Manufacturer)" "INFO"
-            Write-Log "  Status: $($adapter.Status)" $(if ($adapter.Status -eq "OK") { "SUCCESS" } else { "WARNING" })
-            
-            if ($adapter.Status -ne "OK") {
-                Write-Log "  ⚠ Driver issue detected" "WARNING"
-                $Script:WarningsFound++
-            } else {
+
+        foreach ($Adapter in $Adapters) {
+            Write-Log "Adapter: $($Adapter.Name)" "INFO"
+            Write-Log "Manufacturer: $($Adapter.Manufacturer)" "INFO"
+            Write-Log "Driver status: $($Adapter.Status)" "INFO"
+
+            if ($Adapter.Status -eq "OK") {
+                Write-Log "Driver status is healthy" "SUCCESS"
                 $Script:ChecksPassed++
             }
-            
+            else {
+                Write-Log "Possible driver issue detected" "WARNING"
+                $Script:WarningsFound++
+            }
+
             Write-Log "" "INFO"
         }
     }
     catch {
-        Write-Log "Error checking network drivers: $_" "ERROR"
+        Write-Log `
+            "Driver check failed: $($_.Exception.Message)" `
+            "ERROR"
+
         $Script:IssuesFound++
     }
-    
-    Write-Log "" "INFO"
 }
 
+# =========================
+# LATENCY TEST
+# =========================
+
 function Test-NetworkLatency {
-    <#
-    .SYNOPSIS
-        Test latency to multiple hosts
-    #>
     Write-Log "NETWORK LATENCY TEST" "INFO"
     Show-Separator
-    
-    $testHosts = @(
-        @{ Name = "Google DNS"; Host = "8.8.8.8" },
+
+    $TestHosts = @(
+        @{ Name = "Google DNS";     Host = "8.8.8.8" },
         @{ Name = "Cloudflare DNS"; Host = "1.1.1.1" },
-        @{ Name = "Quad9 DNS"; Host = "9.9.9.9" }
+        @{ Name = "Quad9 DNS";      Host = "9.9.9.9" }
     )
-    
-    foreach ($testHost in $testHosts) {
-        Write-Log "Testing: $($testHost.Name) ($($testHost.Host))" "INFO"
-        
+
+    foreach ($TestHost in $TestHosts) {
+        Write-Log `
+            "Testing $($TestHost.Name) ($($TestHost.Host))" `
+            "INFO"
+
         try {
-            $ping = Test-Connection -ComputerName $testHost.Host -Count 4 -ErrorAction SilentlyContinue
-            
-            if ($null -ne $ping) {
-                $avgLatency = [math]::Round(($ping.ResponseTime | Measure-Object -Average).Average, 2)
-                Write-Log "  ✓ Average latency: $avgLatency ms" "SUCCESS"
-                
-                if ($avgLatency -lt 50) {
-                    Write-Log "  ✓ Excellent latency" "SUCCESS"
-                } elseif ($avgLatency -lt 100) {
-                    Write-Log "  ✓ Good latency" "SUCCESS"
-                } else {
-                    Write-Log "  ⚠ High latency detected" "WARNING"
+            $PingResults = Test-Connection `
+                -ComputerName $TestHost.Host `
+                -Count 4 `
+                -ErrorAction SilentlyContinue
+
+            if ($null -ne $PingResults -and $PingResults.Count -gt 0) {
+                $ResponseTimes = @(
+                    $PingResults |
+                        Where-Object { $_.ResponseTime -ne $null } |
+                        Select-Object -ExpandProperty ResponseTime
+                )
+
+                $AverageLatency = [math]::Round(
+                    ($ResponseTimes | Measure-Object -Average).Average,
+                    2
+                )
+
+                Write-Log `
+                    "Average latency: $AverageLatency ms" `
+                    "SUCCESS"
+
+                if ($AverageLatency -lt 50) {
+                    Write-Log "Excellent latency" "SUCCESS"
+                }
+                elseif ($AverageLatency -lt 100) {
+                    Write-Log "Good latency" "SUCCESS"
+                }
+                else {
+                    Write-Log "High latency detected" "WARNING"
                     $Script:WarningsFound++
                 }
-                
+
                 $Script:ChecksPassed++
-            } else {
-                Write-Log "  ✗ No response" "ERROR"
-                $Script:WarningsFound++
+            }
+            else {
+                Write-Log "No response received" "ERROR"
+                $Script:IssuesFound++
             }
         }
         catch {
-            Write-Log "  ✗ Error testing latency: $_" "ERROR"
+            Write-Log `
+                "Latency test failed: $($_.Exception.Message)" `
+                "WARNING"
+
             $Script:WarningsFound++
         }
     }
-    
+
     Write-Log "" "INFO"
 }
 
+# =========================
+# DOWNLOAD SPEED TEST
+# =========================
+
 function Test-NetworkSpeed {
-    <#
-    .SYNOPSIS
-        Estimate network speed through file download
-    #>
     Write-Log "NETWORK SPEED ESTIMATION" "INFO"
     Show-Separator
-    
-    Write-Log "Performing network speed test..." "INFO"
-    Write-Log "⏳ This may take 10-20 seconds..." "WARNING"
-    
+
+    Write-Log "Downloading a test file..." "INFO"
+
+    $TestUrl = "https://speed.hetzner.de/100MB.bin"
+    $TempFile = Join-Path $env:TEMP "NetworkSpeedTest_$(Get-Random).bin"
+
     try {
-        # Test download speed using a remote file
-        $testUrl = "http://www.google.com"
-        $start = Get-Date
-        
-        $webClient = New-Object System.Net.WebClient
-        $response = $webClient.DownloadData($testUrl)
-        
-        $end = Get-Date
-        $duration = ($end - $start).TotalSeconds
-        $bytes = $response.Length
-        $speedMBps = [math]::Round(($bytes / 1MB) / $duration, 2)
-        $speedKbps = [math]::Round($speedMBps * 8, 2)
-        
-        Write-Log "✓ Download speed: $speedMBps MB/s ($speedKbps Kbps)" "SUCCESS"
-        
-        if ($speedMBps -gt 50) {
-            Write-Log "  ✓ Excellent speed" "SUCCESS"
-        } elseif ($speedMBps -gt 10) {
-            Write-Log "  ✓ Good speed" "SUCCESS"
-        } else {
-            Write-Log "  ⚠ Slow speed detected" "WARNING"
+        $Stopwatch = [System.Diagnostics.Stopwatch]::StartNew()
+
+        Invoke-WebRequest `
+            -Uri $TestUrl `
+            -OutFile $TempFile `
+            -UseBasicParsing `
+            -ErrorAction Stop
+
+        $Stopwatch.Stop()
+
+        $FileInfo = Get-Item $TempFile
+        $FileSizeBytes = $FileInfo.Length
+        $DurationSeconds = $Stopwatch.Elapsed.TotalSeconds
+
+        if ($DurationSeconds -le 0) {
+            throw "The download duration was invalid."
+        }
+
+        $SpeedMbps = [math]::Round(
+            (($FileSizeBytes * 8) / $DurationSeconds) / 1MB,
+            2
+        )
+
+        Write-Log "Downloaded: $FileSizeBytes bytes" "INFO"
+        Write-Log "Duration: $DurationSeconds seconds" "INFO"
+        Write-Log "Estimated speed: $SpeedMbps Mbps" "SUCCESS"
+
+        if ($SpeedMbps -ge 100) {
+            Write-Log "Excellent download speed" "SUCCESS"
+        }
+        elseif ($SpeedMbps -ge 25) {
+            Write-Log "Good download speed" "SUCCESS"
+        }
+        else {
+            Write-Log "Slow download speed detected" "WARNING"
             $Script:WarningsFound++
         }
-        
+
         $Script:ChecksPassed++
     }
     catch {
-        Write-Log "Could not perform speed test: $_" "WARNING"
+        Write-Log `
+            "Could not perform speed test: $($_.Exception.Message)" `
+            "WARNING"
+
         $Script:WarningsFound++
     }
-    
+    finally {
+        if (Test-Path $TempFile) {
+            Remove-Item $TempFile -Force -ErrorAction SilentlyContinue
+        }
+    }
+
     Write-Log "" "INFO"
 }
 
+# =========================
+# DIAGNOSTIC REPORT
+# =========================
+
 function Show-DiagnosticReport {
-    <#
-    .SYNOPSIS
-        Display diagnostic summary report
-    #>
     Write-Log "" "INFO"
     Show-Separator
     Write-Log "NETWORK DIAGNOSTIC SUMMARY REPORT" "INFO"
     Show-Separator
-    
-    Write-Log "Issues Found: $($Script:IssuesFound)" $(if ($Script:IssuesFound -gt 0) { "ERROR" } else { "SUCCESS" })
-    Write-Log "Warnings Found: $($Script:WarningsFound)" $(if ($Script:WarningsFound -gt 0) { "WARNING" } else { "SUCCESS" })
-    Write-Log "Checks Passed: $($Script:ChecksPassed)" "SUCCESS"
-    
-    Write-Log "" "INFO"
-    
-    # Calculate network health score
-    $totalChecks = $Script:IssuesFound + $Script:WarningsFound + $Script:ChecksPassed
-    if ($totalChecks -gt 0) {
-        $healthScore = [math]::Round(($Script:ChecksPassed / $totalChecks) * 100, 0)
-        Write-Log "Network Health Score: $healthScore%" $(if ($healthScore -ge 80) { "SUCCESS" } elseif ($healthScore -ge 60) { "WARNING" } else { "ERROR" })
+
+    if ($Script:IssuesFound -gt 0) {
+        Write-Log `
+            "Issues found: $($Script:IssuesFound)" `
+            "ERROR"
     }
-    
+    else {
+        Write-Log `
+            "Issues found: $($Script:IssuesFound)" `
+            "SUCCESS"
+    }
+
+    if ($Script:WarningsFound -gt 0) {
+        Write-Log `
+            "Warnings found: $($Script:WarningsFound)" `
+            "WARNING"
+    }
+    else {
+        Write-Log `
+            "Warnings found: $($Script:WarningsFound)" `
+            "SUCCESS"
+    }
+
+    Write-Log `
+        "Checks passed: $($Script:ChecksPassed)" `
+        "SUCCESS"
+
+    $TotalChecks = `
+        $Script:IssuesFound +
+        $Script:WarningsFound +
+        $Script:ChecksPassed
+
+    if ($TotalChecks -gt 0) {
+        $HealthScore = [math]::Round(
+            ($Script:ChecksPassed / $TotalChecks) * 100,
+            0
+        )
+
+        if ($HealthScore -ge 80) {
+            $HealthLevel = "SUCCESS"
+        }
+        elseif ($HealthScore -ge 60) {
+            $HealthLevel = "WARNING"
+        }
+        else {
+            $HealthLevel = "ERROR"
+        }
+
+        Write-Log `
+            "Network health score: $HealthScore%" `
+            $HealthLevel
+    }
+
     Write-Log "" "INFO"
     Write-Log "RECOMMENDATIONS:" "INFO"
-    
+
     if ($Script:IssuesFound -gt 0) {
-        Write-Log "• Address critical network issues immediately" "ERROR"
-        Write-Log "• Check physical network connections" "ERROR"
-        Write-Log "• Restart network adapters if needed" "ERROR"
+        Write-Log "Review the errors listed above." "ERROR"
+        Write-Log "Check physical network connections." "ERROR"
+        Write-Log "Restart the network adapter if necessary." "ERROR"
     }
-    
+
     if ($Script:WarningsFound -gt 0) {
-        Write-Log "• Review network performance issues" "WARNING"
-        Write-Log "• Consider upgrading internet plan if speeds are slow" "WARNING"
-        Write-Log "• Update network drivers if available" "WARNING"
+        Write-Log "Review latency and speed results." "WARNING"
+        Write-Log "Check for outdated network drivers." "WARNING"
+        Write-Log "Check wireless signal strength and interference." "WARNING"
     }
-    
-    Write-Log "• Monitor network health regularly" "INFO"
-    Write-Log "• Keep network drivers updated" "INFO"
-    Write-Log "• Check for interference if using wireless" "INFO"
-    
+
+    Write-Log "Run this diagnostic periodically." "INFO"
     Show-Separator
 }
 
-# ========== MAIN EXECUTION ==========
+# =========================
+# MAIN
+# =========================
 
 function Main {
-    # Initialize log file
-    if (-not (Test-Path -Path $LogPath)) {
-        New-Item -ItemType Directory -Path $LogPath -Force | Out-Null
+    try {
+        if (-not (Test-Path -Path $LogPath)) {
+            New-Item `
+                -ItemType Directory `
+                -Path $LogPath `
+                -Force `
+                -ErrorAction Stop |
+                Out-Null
+        }
+
+        # Create the file before the first log entry.
+        New-Item `
+            -ItemType File `
+            -Path $LogFile `
+            -Force `
+            -ErrorAction Stop |
+            Out-Null
+
+        Write-Log "NETWORK DIAGNOSTICS SCRIPT" "INFO"
+        Write-Log `
+            "Started: $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')" `
+            "INFO"
+
+        Write-Log "Log file: $LogFile" "INFO"
+        Show-Separator
+
+        Write-Log "PHASE 1: INTERNET CONNECTIVITY" "INFO"
+        Show-Separator
+        Test-InternetConnectivity
+
+        Write-Log "PHASE 2: DNS RESOLUTION" "INFO"
+        Show-Separator
+        Test-DomainResolution
+
+        Write-Log "PHASE 3: DNS SERVER PERFORMANCE" "INFO"
+        Show-Separator
+        Test-DNSServerPerformance
+
+        Write-Log "PHASE 4: NETWORK ADAPTERS" "INFO"
+        Show-Separator
+        Get-NetworkAdapters
+
+        Write-Log "PHASE 5: IP CONFIGURATION" "INFO"
+        Show-Separator
+        Get-IPConfiguration
+
+        Write-Log "PHASE 6: DEFAULT GATEWAY" "INFO"
+        Show-Separator
+        Test-DefaultGateway
+
+        Write-Log "PHASE 7: DUPLICATE IP DETECTION" "INFO"
+        Show-Separator
+        Detect-DuplicateIPs
+
+        Write-Log "PHASE 8: NETWORK DRIVER HEALTH" "INFO"
+        Show-Separator
+        Test-NetworkDrivers
+
+        Write-Log "PHASE 9: NETWORK LATENCY" "INFO"
+        Show-Separator
+        Test-NetworkLatency
+
+        Write-Log "PHASE 10: NETWORK SPEED" "INFO"
+        Show-Separator
+        Test-NetworkSpeed
+
+        Show-DiagnosticReport
+
+        Write-Log `
+            "Completed: $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')" `
+            "INFO"
+
+        Write-Log "Log file saved to: $LogFile" "SUCCESS"
+        Show-Separator
+
+        Write-Host ""
+        Write-Host "Diagnostics completed." -ForegroundColor Cyan
+        Write-Host "Log file: $LogFile" -ForegroundColor Cyan
     }
-    
-    Write-Log "================================================================" "INFO"
-    Write-Log "NETWORK DIAGNOSTICS SCRIPT" "INFO"
-    Write-Log "Started: $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')" "INFO"
-    Write-Log "Log File: $LogFile" "INFO"
-    Show-Separator
-    
-    # ===== PHASE 1: INTERNET CONNECTIVITY =====
-    Write-Log "PHASE 1: INTERNET CONNECTIVITY" "INFO"
-    Show-Separator
-    Test-InternetConnectivity
-    Show-Separator
-    
-    # ===== PHASE 2: DNS RESOLUTION =====
-    Write-Log "PHASE 2: DNS RESOLUTION" "INFO"
-    Show-Separator
-    Test-DomainResolution
-    Show-Separator
-    
-    # ===== PHASE 3: DNS PERFORMANCE =====
-    Write-Log "PHASE 3: DNS SERVER PERFORMANCE" "INFO"
-    Show-Separator
-    Test-DNSServerPerformance
-    Show-Separator
-    
-    # ===== PHASE 4: NETWORK ADAPTERS =====
-    Write-Log "PHASE 4: NETWORK ADAPTERS" "INFO"
-    Show-Separator
-    Get-NetworkAdapters
-    Show-Separator
-    
-    # ===== PHASE 5: IP CONFIGURATION =====
-    Write-Log "PHASE 5: IP CONFIGURATION" "INFO"
-    Show-Separator
-    Get-IPConfiguration
-    Show-Separator
-    
-    # ===== PHASE 6: DUPLICATE IP DETECTION =====
-    Write-Log "PHASE 6: DUPLICATE IP DETECTION" "INFO"
-    Show-Separator
-    Detect-DuplicateIPs
-    Show-Separator
-    
-    # ===== PHASE 7: DRIVER HEALTH =====
-    Write-Log "PHASE 7: NETWORK DRIVER HEALTH" "INFO"
-    Show-Separator
-    Check-NetworkDrivers
-    Show-Separator
-    
-    # ===== PHASE 8: LATENCY TEST =====
-    Write-Log "PHASE 8: NETWORK LATENCY" "INFO"
-    Show-Separator
-    Test-NetworkLatency
-    Show-Separator
-    
-    # ===== PHASE 9: SPEED TEST =====
-    Write-Log "PHASE 9: NETWORK SPEED" "INFO"
-    Show-Separator
-    Test-NetworkSpeed
-    Show-Separator
-    
-    # ===== COMPLETION SUMMARY =====
-    Show-DiagnosticReport
-    
-    Write-Log "" "INFO"
-    Write-Log "Completed: $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')" "INFO"
-    Write-Log "Log file saved to: $LogFile" "INFO"
-    Write-Log "================================================================" "INFO"
-    
-    Write-Host ""
-    Write-Host "Press any key to exit..." -ForegroundColor Cyan
-    $null = $Host.UI.RawUI.ReadKey("NoEcho,IncludeKeyDown")
+    catch {
+        Write-Host `
+            "The script could not complete: $($_.Exception.Message)" `
+            -ForegroundColor Red
+    }
 }
 
-# Run main function
 Main
