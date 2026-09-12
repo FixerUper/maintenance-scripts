@@ -435,7 +435,7 @@ Maintenance Suite
 
 ## 📁 Output Files
 
-All output files are saved to: `%USERPROFILE%\Documents\`
+All output files are saved to: `C:\temp\`
 
 ### Log Files
 - `SystemCleanup_YYYYMMDD_HHmmss.log`
