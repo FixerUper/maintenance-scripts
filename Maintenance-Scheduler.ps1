@@ -1,663 +1,680 @@
 <#
 .SYNOPSIS
     Maintenance Scheduler Script
-    Creates scheduled tasks for automated maintenance scripts
 
 .DESCRIPTION
-    This script creates and manages scheduled maintenance tasks including:
-    - Schedule all maintenance scripts automatically
-    - Configure run frequency (daily, weekly, monthly)
-    - Set specific execution times
-    - Email notifications on completion
-    - Error alerts and notifications
-    - Maintenance history tracking
-    - Skip/reschedule options
-    - Task management and monitoring
-    - Enable/disable individual scripts
-    All configuration is logged to the user's Documents folder
+    Creates and manages scheduled tasks for automated maintenance scripts.
 
 .NOTES
-    Requires Administrator privileges
-    Log file: $env:USERPROFILE\Documents\MaintenanceScheduler_YYYYMMDD_HHmmss.log
-
-.AUTHOR
-    Maintenance Scheduler Script
+    Requires Administrator privileges.
+    Logs and configuration are stored in C:\temp.
 #>
 
-# Requires Administrator privileges
 #Requires -RunAsAdministrator
 
-# ========== CONFIGURATION ==========
-$LogPath = Join-Path -Path $env:USERPROFILE -ChildPath "Documents"
+# =========================
+# CONFIGURATION
+# =========================
+
+$LogPath = "C:\temp"
+
+if (-not (Test-Path -LiteralPath $LogPath)) {
+    New-Item -ItemType Directory -Path $LogPath -Force | Out-Null
+}
+
 $LogFileName = "MaintenanceScheduler_$(Get-Date -Format 'yyyyMMdd_HHmmss').log"
 $LogFile = Join-Path -Path $LogPath -ChildPath $LogFileName
-$TaskNamePrefix = "SystemMaintenance_"
-$ScriptPath = Split-Path -Parent $MyInvocation.MyCommand.Path
 $ConfigFile = Join-Path -Path $LogPath -ChildPath "MaintenanceConfig.json"
 
-# Maintenance scripts configuration
-$MaintenanceScripts = @(
-    @{
-        Name = "Monthly Maintenance"
-        ScriptName = "Windows-Monthly-Maintenance.ps1"
-        Description = "DISM, SFC, CHKDSK system checks"
-        DefaultFrequency = "Monthly"
-        DefaultTime = "02:00"
-    },
-    @{
-        Name = "Package Updates"
-        ScriptName = "Winget-Package-Update.ps1"
-        Description = "Update installed packages via winget"
-        DefaultFrequency = "Weekly"
-        DefaultTime = "03:00"
-    },
-    @{
-        Name = "Windows Updates"
-        ScriptName = "Windows-Updates-Install.ps1"
-        Description = "Install Windows and OS updates"
-        DefaultFrequency = "Weekly"
-        DefaultTime = "03:30"
-    },
-    @{
-        Name = "System Cleanup"
-        ScriptName = "System-Cleanup-Optimization.ps1"
-        Description = "Clean temporary files and optimize"
-        DefaultFrequency = "Weekly"
-        DefaultTime = "02:30"
-    },
-    @{
-        Name = "Health Report"
-        ScriptName = "System-Information-Health-Report.ps1"
-        Description = "Generate system health reports"
-        DefaultFrequency = "Weekly"
-        DefaultTime = "01:00"
-    },
-    @{
-        Name = "Backup & Recovery"
-        ScriptName = "Backup-Recovery.ps1"
-        Description = "Create system backups"
-        DefaultFrequency = "Weekly"
-        DefaultTime = "04:00"
-    },
-    @{
-        Name = "Security Audit"
-        ScriptName = "Security-Audit.ps1"
-        Description = "Perform security audit"
-        DefaultFrequency = "Weekly"
-        DefaultTime = "01:30"
-    },
-    @{
-        Name = "Network Diagnostics"
-        ScriptName = "Network-Diagnostics.ps1"
-        Description = "Network connectivity and speed tests"
-        DefaultFrequency = "Weekly"
-        DefaultTime = "04:30"
-    }
-)
+$TaskNamePrefix = "SystemMaintenance_"
+$ScriptPath = Split-Path -Parent $MyInvocation.MyCommand.Path
+$TaskPath = "\Microsoft\Windows\SystemMaintenance\"
 
 $Script:TasksCreated = 0
 $Script:TasksFailed = 0
 $Script:TasksUpdated = 0
 
-# ========== FUNCTIONS ==========
+$MaintenanceScripts = @(
+    @{
+        Name            = "Monthly Maintenance"
+        ScriptName      = "Windows-Monthly-Maintenance.ps1"
+        Description     = "DISM, SFC, and CHKDSK system checks"
+        DefaultFrequency = "Monthly"
+        DefaultTime     = "02:00"
+    },
+    @{
+        Name            = "Package Updates"
+        ScriptName      = "Winget-Package-Update.ps1"
+        Description     = "Update installed packages using winget"
+        DefaultFrequency = "Weekly"
+        DefaultTime     = "03:00"
+    },
+    @{
+        Name            = "Windows Updates"
+        ScriptName      = "Windows-Updates-Install.ps1"
+        Description     = "Install Windows and operating system updates"
+        DefaultFrequency = "Weekly"
+        DefaultTime     = "03:30"
+    },
+    @{
+        Name            = "System Cleanup"
+        ScriptName      = "System-Cleanup-Optimization.ps1"
+        Description     = "Clean temporary files and optimize the system"
+        DefaultFrequency = "Weekly"
+        DefaultTime     = "02:30"
+    },
+    @{
+        Name            = "Health Report"
+        ScriptName      = "System-Information-Health-Report.ps1"
+        Description     = "Generate system health reports"
+        DefaultFrequency = "Weekly"
+        DefaultTime     = "01:00"
+    },
+    @{
+        Name            = "Backup and Recovery"
+        ScriptName      = "Backup-Recovery.ps1"
+        Description     = "Create system backups"
+        DefaultFrequency = "Weekly"
+        DefaultTime     = "04:00"
+    },
+    @{
+        Name            = "Security Audit"
+        ScriptName      = "Security-Audit.ps1"
+        Description     = "Perform a security audit"
+        DefaultFrequency = "Weekly"
+        DefaultTime     = "01:30"
+    },
+    @{
+        Name            = "Network Diagnostics"
+        ScriptName      = "Network-Diagnostics.ps1"
+        Description     = "Run network connectivity and speed tests"
+        DefaultFrequency = "Weekly"
+        DefaultTime     = "04:30"
+    }
+)
+
+# =========================
+# LOGGING
+# =========================
 
 function Write-Log {
-    <#
-    .SYNOPSIS
-        Write messages to both console and log file
-    #>
     param(
-        [Parameter(Mandatory=$true)]
+        [Parameter(Mandatory = $true)]
         [string]$Message,
-        
+
         [ValidateSet("INFO", "WARNING", "ERROR", "SUCCESS")]
         [string]$Level = "INFO"
     )
-    
-    $timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
-    $logMessage = "[$timestamp] [$Level] $Message"
-    
-    # Write to console with color coding
+
+    $Timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
+    $LogMessage = "[$Timestamp] [$Level] $Message"
+
     switch ($Level) {
-        "INFO"    { Write-Host $logMessage -ForegroundColor White }
-        "WARNING" { Write-Host $logMessage -ForegroundColor Yellow }
-        "ERROR"   { Write-Host $logMessage -ForegroundColor Red }
-        "SUCCESS" { Write-Host $logMessage -ForegroundColor Green }
+        "INFO" {
+            Write-Host $LogMessage -ForegroundColor White
+        }
+        "WARNING" {
+            Write-Host $LogMessage -ForegroundColor Yellow
+        }
+        "ERROR" {
+            Write-Host $LogMessage -ForegroundColor Red
+        }
+        "SUCCESS" {
+            Write-Host $LogMessage -ForegroundColor Green
+        }
     }
-    
-    # Write to log file
-    Add-Content -Path $LogFile -Value $logMessage
+
+    try {
+        Add-Content -LiteralPath $LogFile -Value $LogMessage -ErrorAction Stop
+    }
+    catch {
+        Write-Host "Unable to write to log file: $($_.Exception.Message)" `
+            -ForegroundColor Red
+    }
 }
 
 function Show-Separator {
-    <#
-    .SYNOPSIS
-        Display a visual separator
-    #>
-    Write-Log "================================================================" "INFO"
+    Write-Log ("=" * 70) "INFO"
 }
 
+# =========================
+# CONFIGURATION MANAGEMENT
+# =========================
+
 function Initialize-Configuration {
-    <#
-    .SYNOPSIS
-        Initialize or load scheduler configuration
-    #>
     Write-Log "Initializing scheduler configuration..." "INFO"
-    
-    if (Test-Path -Path $ConfigFile) {
-        Write-Log "✓ Configuration file found: $ConfigFile" "SUCCESS"
-        return (Get-Content -Path $ConfigFile | ConvertFrom-Json)
-    } else {
-        Write-Log "Creating new configuration file..." "INFO"
-        
-        # Create default configuration
-        $config = @{
-            LastUpdated = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
-            EnabledScripts = @()
-            MaintenanceInterval = "Weekly"
-            NotificationsEnabled = $false
-            EmailAddress = ""
+
+    if (Test-Path -LiteralPath $ConfigFile) {
+        try {
+            $Config = Get-Content -LiteralPath $ConfigFile -Raw |
+                ConvertFrom-Json
+
+            Write-Log "Configuration loaded from: $ConfigFile" "SUCCESS"
+            return $Config
         }
-        
-        foreach ($script in $MaintenanceScripts) {
-            $config.EnabledScripts += @{
-                Name = $script.Name
-                Enabled = $true
-                ScriptName = $script.ScriptName
-                Frequency = $script.DefaultFrequency
-                ExecutionTime = $script.DefaultTime
-                LastRun = $null
-                NextRun = $null
-            }
+        catch {
+            Write-Log "Configuration file is invalid. Creating a new one." "WARNING"
         }
-        
-        $config | ConvertTo-Json | Set-Content -Path $ConfigFile
-        Write-Log "✓ Configuration file created: $ConfigFile" "SUCCESS"
-        return $config
     }
+
+    $EnabledScripts = foreach ($ScriptDefinition in $MaintenanceScripts) {
+        [PSCustomObject]@{
+            Name          = $ScriptDefinition.Name
+            Enabled       = $true
+            ScriptName    = $ScriptDefinition.ScriptName
+            Frequency     = $ScriptDefinition.DefaultFrequency
+            ExecutionTime = $ScriptDefinition.DefaultTime
+            LastRun       = $null
+            NextRun       = $null
+        }
+    }
+
+    $Config = [PSCustomObject]@{
+        LastUpdated          = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
+        EnabledScripts       = @($EnabledScripts)
+        MaintenanceInterval  = "Weekly"
+        NotificationsEnabled = $false
+        EmailAddress         = ""
+    }
+
+    Save-Configuration -Config $Config
+    Write-Log "New configuration created: $ConfigFile" "SUCCESS"
+
+    return $Config
 }
 
 function Save-Configuration {
-    <#
-    .SYNOPSIS
-        Save scheduler configuration
-    #>
     param(
+        [Parameter(Mandatory = $true)]
         [object]$Config
     )
-    
+
     try {
         $Config.LastUpdated = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
-        $Config | ConvertTo-Json | Set-Content -Path $ConfigFile
-        Write-Log "✓ Configuration saved" "SUCCESS"
+
+        $Config |
+            ConvertTo-Json -Depth 10 |
+            Set-Content -LiteralPath $ConfigFile -Encoding UTF8
+
+        Write-Log "Configuration saved: $ConfigFile" "SUCCESS"
     }
     catch {
-        Write-Log "✗ Error saving configuration: $_" "ERROR"
+        Write-Log "Error saving configuration: $($_.Exception.Message)" "ERROR"
     }
 }
 
+# =========================
+# SCRIPT VERIFICATION
+# =========================
+
 function Verify-ScriptFiles {
-    <#
-    .SYNOPSIS
-        Verify all maintenance script files exist
-    #>
     Write-Log "VERIFYING MAINTENANCE SCRIPT FILES" "INFO"
     Show-Separator
-    
-    $missingScripts = @()
-    
-    foreach ($script in $MaintenanceScripts) {
-        $scriptFile = Join-Path -Path $ScriptPath -ChildPath $script.ScriptName
-        
-        if (Test-Path -Path $scriptFile) {
-            Write-Log "✓ Found: $($script.ScriptName)" "SUCCESS"
-        } else {
-            Write-Log "✗ Missing: $($script.ScriptName)" "ERROR"
-            $missingScripts += $script.ScriptName
+
+    $MissingScripts = @()
+
+    foreach ($ScriptDefinition in $MaintenanceScripts) {
+        $MaintenanceScriptPath = Join-Path `
+            -Path $ScriptPath `
+            -ChildPath $ScriptDefinition.ScriptName
+
+        if (Test-Path -LiteralPath $MaintenanceScriptPath) {
+            Write-Log "Found: $($ScriptDefinition.ScriptName)" "SUCCESS"
+        }
+        else {
+            Write-Log "Missing: $($ScriptDefinition.ScriptName)" "ERROR"
+            $MissingScripts += $ScriptDefinition.ScriptName
         }
     }
-    
-    Write-Log "" "INFO"
-    
-    if ($missingScripts.Count -gt 0) {
-        Write-Log "⚠ $($missingScripts.Count) script(s) not found" "ERROR"
-        Write-Log "Scripts should be in: $ScriptPath" "WARNING"
+
+    if ($MissingScripts.Count -gt 0) {
+        Write-Log "$($MissingScripts.Count) maintenance script(s) not found." "ERROR"
+        Write-Log "Expected script location: $ScriptPath" "WARNING"
         return $false
-    } else {
-        Write-Log "✓ All maintenance scripts verified" "SUCCESS"
+    }
+
+    Write-Log "All maintenance scripts were verified." "SUCCESS"
+    return $true
+}
+
+# =========================
+# SCHEDULED TASK FUNCTIONS
+# =========================
+
+function Ensure-TaskFolder {
+    try {
+        $TaskService = New-Object -ComObject Schedule.Service
+        $TaskService.Connect()
+
+        $RootFolder = $TaskService.GetFolder("\")
+
+        try {
+            $null = $RootFolder.GetFolder($TaskPath.Trim("\"))
+        }
+        catch {
+            $null = $RootFolder.CreateFolder(
+                $TaskPath.Trim("\"),
+                $null
+            )
+        }
+
         return $true
+    }
+    catch {
+        Write-Log "Unable to create or access task folder: $($_.Exception.Message)" `
+            "WARNING"
+        return $false
     }
 }
 
 function Create-ScheduledTask {
-    <#
-    .SYNOPSIS
-        Create a scheduled task for a maintenance script
-    #>
     param(
+        [Parameter(Mandatory = $true)]
         [string]$TaskName,
+
+        [Parameter(Mandatory = $true)]
         [string]$ScriptName,
+
+        [Parameter(Mandatory = $true)]
         [string]$Description,
+
+        [Parameter(Mandatory = $true)]
+        [ValidateSet("Daily", "Weekly", "Monthly")]
         [string]$Frequency,
+
+        [Parameter(Mandatory = $true)]
         [string]$ExecutionTime
     )
-    
+
     Write-Log "Creating scheduled task: $TaskName" "INFO"
-    
+
     try {
-        $scriptFile = Join-Path -Path $ScriptPath -ChildPath $ScriptName
-        
-        if (-not (Test-Path -Path $scriptFile)) {
-            Write-Log "  ✗ Script file not found: $scriptFile" "ERROR"
+        $MaintenanceScriptPath = Join-Path `
+            -Path $ScriptPath `
+            -ChildPath $ScriptName
+
+        if (-not (Test-Path -LiteralPath $MaintenanceScriptPath)) {
+            Write-Log "Script not found: $MaintenanceScriptPath" "ERROR"
+            $Script:TasksFailed++
             return $false
         }
-        
-        # Create script action
-        $action = New-ScheduledTaskAction `
+
+        if (-not (Ensure-TaskFolder)) {
+            $Script:TasksFailed++
+            return $false
+        }
+
+        $PowerShellArguments = @(
+            "-NoProfile"
+            "-ExecutionPolicy Bypass"
+            "-WindowStyle Hidden"
+            "-File `"$MaintenanceScriptPath`""
+        ) -join " "
+
+        $Action = New-ScheduledTaskAction `
             -Execute "PowerShell.exe" `
-            -Argument "-NoProfile -WindowStyle Hidden -File `"$scriptFile`"" `
-            -ErrorAction Stop
-        
-        # Create trigger based on frequency
-        $trigger = switch ($Frequency) {
+            -Argument $PowerShellArguments
+
+        switch ($Frequency) {
             "Daily" {
-                $timeSpan = [TimeSpan]::Parse($ExecutionTime)
-                New-ScheduledTaskTrigger `
+                $Trigger = New-ScheduledTaskTrigger `
                     -Daily `
-                    -At $ExecutionTime `
-                    -ErrorAction Stop
+                    -At $ExecutionTime
             }
+
             "Weekly" {
-                $timeSpan = [TimeSpan]::Parse($ExecutionTime)
-                New-ScheduledTaskTrigger `
+                $Trigger = New-ScheduledTaskTrigger `
                     -Weekly `
                     -DaysOfWeek Sunday `
-                    -At $ExecutionTime `
-                    -ErrorAction Stop
+                    -At $ExecutionTime
             }
+
             "Monthly" {
-                $timeSpan = [TimeSpan]::Parse($ExecutionTime)
-                New-ScheduledTaskTrigger `
+                $Trigger = New-ScheduledTaskTrigger `
                     -Monthly `
                     -DaysOfMonth 1 `
-                    -At $ExecutionTime `
-                    -ErrorAction Stop
-            }
-            default {
-                Write-Log "  ✗ Unknown frequency: $Frequency" "ERROR"
-                return $false
+                    -At $ExecutionTime
             }
         }
-        
-        # Create task settings
-        $settings = New-ScheduledTaskSettingsSet `
+
+        $Settings = New-ScheduledTaskSettingsSet `
             -AllowStartIfOnBatteries `
-            -Compatibility Win8 `
+            -DontStopIfGoingOnBatteries `
             -StartWhenAvailable `
-            -ErrorAction Stop
-        
-        # Create principal (run as SYSTEM with admin rights)
-        $principal = New-ScheduledTaskPrincipal `
+            -Compatibility Win8
+
+        $Principal = New-ScheduledTaskPrincipal `
             -UserId "SYSTEM" `
             -LogonType ServiceAccount `
-            -RunLevel Highest `
-            -ErrorAction Stop
-        
-        # Register the task
-        $taskFolder = "Microsoft\Windows\SystemMaintenance"
-        
-        # Create folder if it doesn't exist
-        try {
-            $taskScheduler = New-Object -ComObject Schedule.Service
-            $taskScheduler.Connect()
-            $rootFolder = $taskScheduler.GetFolder("\")
-            
-            try {
-                $rootFolder.CreateFolder($taskFolder)
-            }
-            catch {
-                # Folder might already exist
-                $null = $null
-            }
-        }
-        catch {
-            Write-Log "  ⚠ Could not create task folder: $_" "WARNING"
-        }
-        
-        $existingTask = Get-ScheduledTask -TaskName $TaskName -TaskPath "\Microsoft\Windows\SystemMaintenance\" -ErrorAction SilentlyContinue
-        
-        if ($null -ne $existingTask) {
-            Write-Log "  ⚠ Task already exists, updating..." "WARNING"
-            Unregister-ScheduledTask -TaskName $TaskName -TaskPath "\Microsoft\Windows\SystemMaintenance\" -Confirm:$false
+            -RunLevel Highest
+
+        $ExistingTask = Get-ScheduledTask `
+            -TaskName $TaskName `
+            -TaskPath $TaskPath `
+            -ErrorAction SilentlyContinue
+
+        if ($null -ne $ExistingTask) {
+            Write-Log "Task already exists. Updating it." "WARNING"
+
+            Unregister-ScheduledTask `
+                -TaskName $TaskName `
+                -TaskPath $TaskPath `
+                -Confirm:$false
+
             $Script:TasksUpdated++
         }
-        
+
         Register-ScheduledTask `
             -TaskName $TaskName `
-            -TaskPath "\Microsoft\Windows\SystemMaintenance\" `
-            -Action $action `
-            -Trigger $trigger `
-            -Settings $settings `
-            -Principal $principal `
+            -TaskPath $TaskPath `
+            -Action $Action `
+            -Trigger $Trigger `
+            -Settings $Settings `
+            -Principal $Principal `
             -Description $Description `
             -Force `
             -ErrorAction Stop
-        
-        Write-Log "  ✓ Task created successfully" "SUCCESS"
-        Write-Log "    Frequency: $Frequency at $ExecutionTime" "INFO"
+
+        Write-Log "Task created successfully." "SUCCESS"
+        Write-Log "Schedule: $Frequency at $ExecutionTime" "INFO"
+
         $Script:TasksCreated++
         return $true
     }
     catch {
-        Write-Log "  ✗ Error creating task: $_" "ERROR"
+        Write-Log "Error creating task: $($_.Exception.Message)" "ERROR"
         $Script:TasksFailed++
         return $false
     }
 }
 
-function List-ScheduledTasks {
-    <#
-    .SYNOPSIS
-        List all scheduled maintenance tasks
-    #>
-    Write-Log "SCHEDULED MAINTENANCE TASKS" "INFO"
-    Show-Separator
-    
-    try {
-        $tasks = Get-ScheduledTask -TaskPath "\Microsoft\Windows\SystemMaintenance\" -ErrorAction SilentlyContinue
-        
-        if ($null -eq $tasks) {
-            Write-Log "No scheduled maintenance tasks found" "WARNING"
-            return
-        }
-        
-        $taskCount = if ($tasks -is [array]) { $tasks.Count } else { 1 }
-        Write-Log "Found $taskCount scheduled task(s):" "INFO"
-        Write-Log "" "INFO"
-        
-        foreach ($task in $tasks) {
-            Write-Log "Task: $($task.TaskName)" "INFO"
-            Write-Log "  Status: $($task.State)" $(if ($task.State -eq "Ready") { "SUCCESS" } else { "WARNING" })
-            Write-Log "  Description: $($task.Description)" "INFO"
-            
-            if ($null -ne $task.LastTaskResult) {
-                $status = if ($task.LastTaskResult -eq 0) { "SUCCESS" } else { "ERROR" }
-                Write-Log "  Last Result: $($task.LastTaskResult)" $status
-            }
-            
-            Write-Log "" "INFO"
-        }
-    }
-    catch {
-        Write-Log "Error listing tasks: $_" "ERROR"
-    }
-    
-    Write-Log "" "INFO"
-}
-
 function Enable-MaintenanceSchedule {
-    <#
-    .SYNOPSIS
-        Create all scheduled tasks
-    #>
     param(
+        [Parameter(Mandatory = $true)]
         [object]$Config
     )
-    
+
     Write-Log "CREATING MAINTENANCE SCHEDULE" "INFO"
     Show-Separator
-    
-    foreach ($script in $MaintenanceScripts) {
-        $scriptConfig = $Config.EnabledScripts | Where-Object { $_.ScriptName -eq $script.ScriptName }
-        
-        if ($null -eq $scriptConfig -or $scriptConfig.Enabled) {
-            $taskName = $TaskNamePrefix + $script.Name -replace " ", ""
-            
+
+    foreach ($ScriptDefinition in $MaintenanceScripts) {
+        $ScriptConfig = @(
+            $Config.EnabledScripts |
+                Where-Object {
+                    $_.ScriptName -eq $ScriptDefinition.ScriptName
+                }
+        ) | Select-Object -First 1
+
+        if ($null -eq $ScriptConfig -or $ScriptConfig.Enabled -eq $true) {
+            $Frequency = $ScriptDefinition.DefaultFrequency
+            $ExecutionTime = $ScriptDefinition.DefaultTime
+
+            if ($null -ne $ScriptConfig) {
+                if (-not [string]::IsNullOrWhiteSpace($ScriptConfig.Frequency)) {
+                    $Frequency = $ScriptConfig.Frequency
+                }
+
+                if (-not [string]::IsNullOrWhiteSpace($ScriptConfig.ExecutionTime)) {
+                    $ExecutionTime = $ScriptConfig.ExecutionTime
+                }
+            }
+
+            $SafeName = $ScriptDefinition.Name -replace "[^a-zA-Z0-9]", ""
+            $TaskName = "$TaskNamePrefix$SafeName"
+
             Create-ScheduledTask `
-                -TaskName $taskName `
-                -ScriptName $script.ScriptName `
-                -Description $script.Description `
-                -Frequency ($scriptConfig.Frequency ?? $script.DefaultFrequency) `
-                -ExecutionTime ($scriptConfig.ExecutionTime ?? $script.DefaultTime)
-            
-            Write-Log "" "INFO"
+                -TaskName $TaskName `
+                -ScriptName $ScriptDefinition.ScriptName `
+                -Description $ScriptDefinition.Description `
+                -Frequency $Frequency `
+                -ExecutionTime $ExecutionTime
+        }
+        else {
+            Write-Log "Skipping disabled script: $($ScriptDefinition.Name)" `
+                "WARNING"
         }
     }
-    
-    Write-Log "" "INFO"
-    Show-Separator
 }
 
 function Disable-MaintenanceSchedule {
-    <#
-    .SYNOPSIS
-        Disable all scheduled maintenance tasks
-    #>
     Write-Log "DISABLING MAINTENANCE SCHEDULE" "INFO"
     Show-Separator
-    
+
     try {
-        $tasks = Get-ScheduledTask -TaskPath "\Microsoft\Windows\SystemMaintenance\" -ErrorAction SilentlyContinue
-        
-        if ($null -eq $tasks) {
-            Write-Log "No tasks found to disable" "INFO"
+        $Tasks = @(Get-ScheduledTask `
+            -TaskPath $TaskPath `
+            -ErrorAction SilentlyContinue)
+
+        if ($Tasks.Count -eq 0) {
+            Write-Log "No maintenance tasks found." "INFO"
             return
         }
-        
-        foreach ($task in $tasks) {
-            Write-Log "Disabling: $($task.TaskName)" "INFO"
-            Disable-ScheduledTask -TaskName $task.TaskName -TaskPath "\Microsoft\Windows\SystemMaintenance\" -ErrorAction SilentlyContinue
-            Write-Log "  ✓ Disabled" "SUCCESS"
+
+        foreach ($Task in $Tasks) {
+            Write-Log "Disabling: $($Task.TaskName)" "INFO"
+
+            Disable-ScheduledTask `
+                -TaskName $Task.TaskName `
+                -TaskPath $TaskPath `
+                -ErrorAction SilentlyContinue
+
+            Write-Log "Task disabled." "SUCCESS"
         }
     }
     catch {
-        Write-Log "Error disabling tasks: $_" "ERROR"
+        Write-Log "Error disabling tasks: $($_.Exception.Message)" "ERROR"
     }
-    
-    Write-Log "" "INFO"
 }
 
-function Show-MaintenanceMenu {
-    <#
-    .SYNOPSIS
-        Display interactive maintenance menu
-    #>
-    Write-Log "" "INFO"
+function List-ScheduledTasks {
+    Write-Log "SCHEDULED MAINTENANCE TASKS" "INFO"
     Show-Separator
-    Write-Log "MAINTENANCE SCHEDULER MENU" "INFO"
-    Show-Separator
-    
-    Write-Host ""
-    Write-Host "Select an option:" -ForegroundColor Cyan
-    Write-Host ""
-    Write-Host "1. Enable maintenance schedule (create all tasks)" -ForegroundColor Yellow
-    Write-Host "2. Disable maintenance schedule (disable all tasks)" -ForegroundColor Yellow
-    Write-Host "3. View scheduled tasks" -ForegroundColor Yellow
-    Write-Host "4. Test run a maintenance script" -ForegroundColor Yellow
-    Write-Host "5. Configure email notifications" -ForegroundColor Yellow
-    Write-Host "6. Exit" -ForegroundColor Yellow
-    Write-Host ""
-    
-    $choice = Read-Host "Enter your choice (1-6)"
-    return $choice
-}
 
-function Test-MaintenanceScript {
-    <#
-    .SYNOPSIS
-        Test run a maintenance script
-    #>
-    Write-Log "TEST RUN MAINTENANCE SCRIPT" "INFO"
-    Show-Separator
-    
-    Write-Host ""
-    Write-Host "Available scripts:" -ForegroundColor Cyan
-    for ($i = 0; $i -lt $MaintenanceScripts.Count; $i++) {
-        Write-Host "$($i + 1). $($MaintenanceScripts[$i].Name)" -ForegroundColor Yellow
-    }
-    
-    $selection = Read-Host "Select script number (or 0 to cancel)"
-    
-    if ($selection -eq "0" -or [int]$selection -lt 1 -or [int]$selection -gt $MaintenanceScripts.Count) {
-        Write-Log "Script selection cancelled" "INFO"
-        return
-    }
-    
-    $scriptToRun = $MaintenanceScripts[[int]$selection - 1]
-    $scriptPath = Join-Path -Path $ScriptPath -ChildPath $scriptToRun.ScriptName
-    
-    if (-not (Test-Path -Path $scriptPath)) {
-        Write-Log "✗ Script not found: $scriptPath" "ERROR"
-        return
-    }
-    
-    Write-Log "Running test: $($scriptToRun.Name)" "INFO"
-    Write-Log "Script: $scriptPath" "INFO"
-    
     try {
-        & $scriptPath
-        Write-Log "✓ Test run completed" "SUCCESS"
+        $Tasks = @(Get-ScheduledTask `
+            -TaskPath $TaskPath `
+            -ErrorAction SilentlyContinue)
+
+        if ($Tasks.Count -eq 0) {
+            Write-Log "No scheduled maintenance tasks found." "WARNING"
+            return
+        }
+
+        foreach ($Task in $Tasks) {
+            $TaskInfo = Get-ScheduledTaskInfo `
+                -TaskName $Task.TaskName `
+                -TaskPath $TaskPath `
+                -ErrorAction SilentlyContinue
+
+            Write-Log "Task: $($Task.TaskName)" "INFO"
+            Write-Log "Status: $($Task.State)" `
+                $(if ($Task.State -eq "Ready") { "SUCCESS" } else { "WARNING" })
+
+            if ($null -ne $TaskInfo) {
+                Write-Log "Last Run: $($TaskInfo.LastRunTime)" "INFO"
+                Write-Log "Next Run: $($TaskInfo.NextRunTime)" "INFO"
+                Write-Log "Last Result: $($TaskInfo.LastTaskResult)" `
+                    $(if ($TaskInfo.LastTaskResult -eq 0) {
+                        "SUCCESS"
+                    }
+                    else {
+                        "WARNING"
+                    })
+            }
+
+            Write-Log "" "INFO"
+        }
     }
     catch {
-        Write-Log "✗ Error running script: $_" "ERROR"
+        Write-Log "Error listing tasks: $($_.Exception.Message)" "ERROR"
+    }
+}
+
+# =========================
+# TEST AND NOTIFICATION FUNCTIONS
+# =========================
+
+function Test-MaintenanceScript {
+    Write-Log "TEST RUN MAINTENANCE SCRIPT" "INFO"
+    Show-Separator
+
+    for ($Index = 0; $Index -lt $MaintenanceScripts.Count; $Index++) {
+        Write-Host "$($Index + 1). $($MaintenanceScripts[$Index].Name)" `
+            -ForegroundColor Yellow
+    }
+
+    Write-Host "0. Cancel" -ForegroundColor Yellow
+    $Selection = Read-Host "Select a script number"
+
+    if ($Selection -notmatch "^\d+$") {
+        Write-Log "Invalid selection." "ERROR"
+        return
+    }
+
+    $SelectedIndex = [int]$Selection - 1
+
+    if ($Selection -eq "0") {
+        Write-Log "Test cancelled." "INFO"
+        return
+    }
+
+    if ($SelectedIndex -lt 0 -or
+        $SelectedIndex -ge $MaintenanceScripts.Count) {
+        Write-Log "Invalid script selection." "ERROR"
+        return
+    }
+
+    $SelectedScript = $MaintenanceScripts[$SelectedIndex]
+    $SelectedScriptPath = Join-Path `
+        -Path $ScriptPath `
+        -ChildPath $SelectedScript.ScriptName
+
+    if (-not (Test-Path -LiteralPath $SelectedScriptPath)) {
+        Write-Log "Script not found: $SelectedScriptPath" "ERROR"
+        return
+    }
+
+    Write-Log "Running test: $($SelectedScript.Name)" "INFO"
+
+    try {
+        & $SelectedScriptPath
+        Write-Log "Test run completed successfully." "SUCCESS"
+    }
+    catch {
+        Write-Log "Test run failed: $($_.Exception.Message)" "ERROR"
     }
 }
 
 function Configure-Notifications {
-    <#
-    .SYNOPSIS
-        Configure email notifications
-    #>
     Write-Log "CONFIGURE EMAIL NOTIFICATIONS" "INFO"
     Show-Separator
-    
-    Write-Host ""
-    Write-Host "Email notifications configuration" -ForegroundColor Cyan
-    Write-Host ""
-    Write-Host "Note: Email configuration requires SMTP server setup" -ForegroundColor Yellow
-    Write-Host ""
-    
-    $enableNotifications = Read-Host "Enable email notifications? (y/n)"
-    
-    if ($enableNotifications -eq "y" -or $enableNotifications -eq "Y") {
-        $emailAddress = Read-Host "Enter email address for notifications"
-        Write-Log "Email notifications enabled: $emailAddress" "SUCCESS"
-        Write-Log "⚠ SMTP configuration required in script settings" "WARNING"
-    } else {
-        Write-Log "Email notifications disabled" "INFO"
+
+    $EnableNotifications = Read-Host `
+        "Enable email notifications? Enter Y or N"
+
+    if ($EnableNotifications -match "^[Yy]$") {
+        $EmailAddress = Read-Host "Enter the notification email address"
+
+        Write-Log "Email notifications enabled for: $EmailAddress" "SUCCESS"
+        Write-Log "SMTP settings must be implemented before sending email." "WARNING"
     }
-    
-    Write-Log "" "INFO"
+    else {
+        Write-Log "Email notifications disabled." "INFO"
+    }
 }
+
+# =========================
+# DISPLAY FUNCTIONS
+# =========================
 
 function Show-ScheduleReport {
-    <#
-    .SYNOPSIS
-        Display schedule setup summary
-    #>
-    Write-Log "" "INFO"
-    Show-Separator
     Write-Log "MAINTENANCE SCHEDULER SUMMARY" "INFO"
     Show-Separator
-    
-    Write-Log "Tasks Created: $($Script:TasksCreated)" "SUCCESS"
-    Write-Log "Tasks Updated: $($Script:TasksUpdated)" "INFO"
-    Write-Log "Tasks Failed: $($Script:TasksFailed)" $(if ($Script:TasksFailed -gt 0) { "ERROR" } else { "SUCCESS" })
-    
-    Write-Log "" "INFO"
+
+    Write-Log "Tasks Created: $Script:TasksCreated" "SUCCESS"
+    Write-Log "Tasks Updated: $Script:TasksUpdated" "INFO"
+    Write-Log "Tasks Failed: $Script:TasksFailed" `
+        $(if ($Script:TasksFailed -gt 0) { "ERROR" } else { "SUCCESS" })
+
     Write-Log "Configuration File: $ConfigFile" "INFO"
+    Write-Log "Log File: $LogFile" "INFO"
     Write-Log "Script Path: $ScriptPath" "INFO"
-    
-    Write-Log "" "INFO"
-    Write-Log "SCHEDULED MAINTENANCE SCRIPTS:" "INFO"
-    foreach ($script in $MaintenanceScripts) {
-        Write-Log "  • $($script.Name)" "SUCCESS"
-        Write-Log "    Default: $($script.DefaultFrequency) at $($script.DefaultTime)" "INFO"
-    }
-    
-    Show-Separator
 }
 
-# ========== MAIN EXECUTION ==========
+function Show-MaintenanceMenu {
+    Write-Host ""
+    Show-Separator
+    Write-Host "MAINTENANCE SCHEDULER MENU" -ForegroundColor Cyan
+    Show-Separator
+
+    Write-Host "1. Enable maintenance schedule" -ForegroundColor Yellow
+    Write-Host "2. Disable maintenance schedule" -ForegroundColor Yellow
+    Write-Host "3. View scheduled tasks" -ForegroundColor Yellow
+    Write-Host "4. Test a maintenance script" -ForegroundColor Yellow
+    Write-Host "5. Configure email notifications" -ForegroundColor Yellow
+    Write-Host "6. Exit" -ForegroundColor Yellow
+    Write-Host ""
+
+    return Read-Host "Enter your choice"
+}
+
+# =========================
+# MAIN
+# =========================
 
 function Main {
-    # Initialize log file
-    if (-not (Test-Path -Path $LogPath)) {
-        New-Item -ItemType Directory -Path $LogPath -Force | Out-Null
-    }
-    
-    Write-Log "================================================================" "INFO"
-    Write-Log "MAINTENANCE SCHEDULER SCRIPT" "INFO"
-    Write-Log "Started: $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')" "INFO"
-    Write-Log "Log File: $LogFile" "INFO"
+    Write-Log "MAINTENANCE SCHEDULER SCRIPT STARTED" "INFO"
+    Write-Log "Log file: $LogFile" "INFO"
+    Write-Log "Configuration file: $ConfigFile" "INFO"
+    Write-Log "Script path: $ScriptPath" "INFO"
     Show-Separator
-    
-    # ===== PHASE 1: VERIFICATION =====
-    Write-Log "PHASE 1: SCRIPT VERIFICATION" "INFO"
-    Show-Separator
+
     if (-not (Verify-ScriptFiles)) {
-        Write-Log "" "INFO"
-        Write-Log "Cannot proceed - required script files missing" "ERROR"
-        Write-Host "Press any key to exit..." -ForegroundColor Cyan
-        $null = $Host.UI.RawUI.ReadKey("NoEcho,IncludeKeyDown")
-        exit 1
+        Write-Log "Required scripts are missing. Exiting." "ERROR"
+        return
     }
-    Show-Separator
-    
-    # ===== PHASE 2: CONFIGURATION =====
-    Write-Log "PHASE 2: CONFIGURATION SETUP" "INFO"
-    Show-Separator
-    $config = Initialize-Configuration
-    Show-Separator
-    
-    # ===== PHASE 3: INTERACTIVE MENU =====
-    $menuLoop = $true
-    while ($menuLoop) {
-        $choice = Show-MaintenanceMenu
-        
-        switch ($choice) {
+
+    $Config = Initialize-Configuration
+    $MenuLoop = $true
+
+    while ($MenuLoop) {
+        $Choice = Show-MaintenanceMenu
+
+        switch ($Choice) {
             "1" {
-                Write-Log "" "INFO"
-                Enable-MaintenanceSchedule -Config $config
+                Enable-MaintenanceSchedule -Config $Config
                 List-ScheduledTasks
             }
+
             "2" {
-                Write-Log "" "INFO"
                 Disable-MaintenanceSchedule
             }
+
             "3" {
-                Write-Log "" "INFO"
                 List-ScheduledTasks
             }
+
             "4" {
-                Write-Log "" "INFO"
                 Test-MaintenanceScript
             }
+
             "5" {
-                Write-Log "" "INFO"
                 Configure-Notifications
             }
+
             "6" {
-                $menuLoop = $false
+                $MenuLoop = $false
+                Write-Log "Exiting scheduler." "INFO"
             }
+
             default {
-                Write-Log "Invalid selection: $choice" "ERROR"
+                Write-Log "Invalid selection: $Choice" "ERROR"
             }
         }
     }
-    
-    # ===== COMPLETION SUMMARY =====
+
     Show-ScheduleReport
-    
-    Write-Log "" "INFO"
-    Write-Log "Completed: $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')" "INFO"
-    Write-Log "Log file saved to: $LogFile" "INFO"
-    Write-Log "================================================================" "INFO"
-    
-    Write-Host ""
-    Write-Host "Press any key to exit..." -ForegroundColor Cyan
-    $null = $Host.UI.RawUI.ReadKey("NoEcho,IncludeKeyDown")
+    Write-Log "MAINTENANCE SCHEDULER SCRIPT COMPLETED" "SUCCESS"
 }
 
-# Run main function
 Main
