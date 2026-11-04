@@ -177,6 +177,29 @@ function Test-WingetAvailability {
     Write-Log "Checking winget availability..."
 
     try {
+        # Register App Installer for the current user if needed.
+        $appInstaller = Get-AppxPackage -Name Microsoft.DesktopAppInstaller `
+            -ErrorAction SilentlyContinue
+
+        if (-not $appInstaller) {
+            Write-Log "App Installer is not registered for this user. Registering winget..."
+
+            Add-AppxPackage `
+                -RegisterByFamilyName `
+                -MainPackage Microsoft.DesktopAppInstaller_8wekyb3d8bbwe `
+                -ErrorAction Stop
+
+            # Confirm registration succeeded before continuing.
+            $appInstaller = Get-AppxPackage -Name Microsoft.DesktopAppInstaller `
+                -ErrorAction SilentlyContinue
+
+            if (-not $appInstaller) {
+                throw "App Installer registration did not appear for the current user."
+            }
+
+            Write-Log "App Installer registered successfully." "SUCCESS"
+        }
+
         $script:WingetPath = Find-WingetExecutable
 
         if ([string]::IsNullOrWhiteSpace($script:WingetPath)) {
